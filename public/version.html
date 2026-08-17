@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>版本记录</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  .version-page { max-width: 1100px; margin: 30px auto; padding: 0 20px; }
+  .back-link { margin-bottom: 16px; display: inline-block; }
+  .version-card { background: #fff; border: 1px solid var(--line); border-radius: 16px; padding: 18px 20px; margin-bottom: 14px; box-shadow: var(--shadow); }
+  .version-card h3 { margin: 0 0 6px; color: var(--deep-sea); }
+  .version-card .time { color: var(--text-3); font-size: 12px; }
+  .version-card .detail { margin-top: 8px; color: var(--text-2); line-height: 1.7; }
+</style>
+</head>
+<body>
+<main class="version-page">
+  <a class="btn back-link" href="index.html">← 返回主页面</a>
+  <h1 style="color:var(--deep-sea)">版本记录</h1>
+  <div id="versionList"></div>
+</main>
+<footer class="footer" style="max-width:1100px;margin:0 auto;">
+  <p>四轮汽车线束后段预装工艺生成器 · MIT 开源协议 · 版权 © 2026 Dream · 制作者：Dream</p>
+  <p>开源项目地址：<a class="footer-link" href="https://gitee.com/yangchenzhao1/Pre-installed-Process" target="_blank" rel="noopener">https://gitee.com/yangchenzhao1/Pre-installed-Process</a>（点击在新窗口/浏览器中打开）</p>
+  <p>如有提议可在 <a class="footer-link" href="https://gitee.com/yangchenzhao1/Pre-installed-Process/issues" target="_blank" rel="noopener">Gitee Issues</a> 提出，或微信联系：<span class="wechat-link">Fedariovo-321</span>（点击弹出微信二维码）</p>
+  <p>当前版本 <span class="ver-chip" id="verCurrent">…</span> ｜ 最新版本 <span class="ver-chip" id="verLatest">…</span></p>
+</footer>
+<script>
+function esc(v) {
+  return String(v == null ? "" : v)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+async function load() {
+  const resp = await fetch('/api/version');
+  const data = await resp.json();
+  const list = document.getElementById('versionList');
+  list.innerHTML = '<p>当前版本：<strong>' + esc(data.version) + '</strong></p>' + (data.records || []).map(r => `
+    <div class="version-card">
+      <h3>${esc(r.version)} · ${esc(r.action)}</h3>
+      <div class="time">${esc(r.time)}</div>
+      <div class="detail">${esc(r.detail || '')}</div>
+      ${(r.modules || []).length ? '<div class="detail">影响模块：' + esc(r.modules.join('、')) + '</div>' : ''}
+    </div>
+  `).join('') || '<p>暂无记录</p>';
+}
+load();
+</script>
+<script src="contact.js"></script>
+</body>
+</html>

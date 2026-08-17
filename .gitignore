@@ -1,0 +1,40 @@
+# ===== 依赖目录，不提交 =====
+node_modules/
+
+# ===== 构建 / 打包产物（体积大；如需分发用 GitHub Releases 发布 zip） =====
+dist/
+*.zip
+
+# ===== 运行时数据：后台密码哈希、端口、暂存、临时PDF —— 绝不提交 =====
+data/backend_auth.json
+data/port.json
+data/stash/
+data/temp_upload.pdf
+# 说明：data/version_history.json 会入库（它是本项目版本演进记录，
+#       是后台数据页/版本记录的数据来源）
+
+# ===== 客户/项目资料文件（若出现于工作区，绝不提交） =====
+*.xlsx
+*.xls
+*.pdf
+
+# ===== 本地临时 / 测试残留 =====
+*.log
+test_*.json
+test_*.xlsx
+test_write.txt
+bat_new.txt
+tmp/
+_*.js
+
+# ===== 发布产物 / 本地发布说明（不提交） =====
+发布输出/
+发布说明.txt
+_publish_tmp/
+
+# ===== 操作系统 / 编辑器 =====
+Thumbs.db
+Desktop.ini
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>后台数据入口</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  .backend-page { max-width: 1200px; margin: 30px auto; padding: 0 20px; }
+  .auth-card { max-width: 420px; margin: 60px auto; background: #fff; border: 1px solid var(--line); border-radius: 20px; padding: 30px; box-shadow: var(--shadow); text-align: center; }
+  .auth-card input { width: 100%; margin: 16px 0; padding: 12px 16px; border: 1px solid var(--line); border-radius: 12px; font-size: 15px; }
+  .data-card { background: #fff; border: 1px solid var(--line); border-radius: 16px; padding: 18px; margin-bottom: 16px; box-shadow: var(--shadow); }
+  pre { background: #f8fafc; border: 1px solid var(--line); border-radius: 12px; padding: 16px; overflow: auto; max-height: 600px; font-size: 12px; }
+  .guide { color: var(--text-2); line-height: 1.8; }
+</style>
+</head>
+<body>
+<main class="backend-page">
+  <a class="btn" href="index.html">← 返回主页面</a>
+  <div id="authCard" class="auth-card">
+    <h2 style="color:var(--deep-sea)">后台数据入口</h2>
+    <p style="color:var(--text-3)">请输入访问密码</p>
+    <input type="password" id="password" placeholder="密码">
+    <button class="btn primary" id="authBtn">解锁</button>
+    <div id="authMsg" style="color:var(--red);margin-top:10px"></div>
+  </div>
+  <div id="dataArea" hidden></div>
+</main>
+<footer class="footer" style="max-width:1200px;margin:0 auto;">
+  <p>四轮汽车线束后段预装工艺生成器 · MIT 开源协议 · 版权 © 2026 Dream · 制作者：Dream</p>
+  <p>开源项目地址：<a class="footer-link" href="https://gitee.com/yangchenzhao1/Pre-installed-Process" target="_blank" rel="noopener">https://gitee.com/yangchenzhao1/Pre-installed-Process</a>（点击在新窗口/浏览器中打开）</p>
+  <p>如有提议可在 <a class="footer-link" href="https://gitee.com/yangchenzhao1/Pre-installed-Process/issues" target="_blank" rel="noopener">Gitee Issues</a> 提出，或微信联系：<span class="wechat-link">Fedariovo-321</span>（点击弹出微信二维码）</p>
+  <p>当前版本 <span class="ver-chip" id="verCurrent">…</span> ｜ 最新版本 <span class="ver-chip" id="verLatest">…</span></p>
+</footer>
+<script>
+function esc(v) {
+  return String(v == null ? "" : v)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+async function auth() {
+  const password = document.getElementById('password').value;
+  const msg = document.getElementById('authMsg');
+  msg.textContent = '';
+  const resp = await fetch('/api/backend/auth', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ password })
+  });
+  const data = await resp.json();
+  if (!resp.ok || !data.ok) {
+    msg.textContent = data.error || '密码错误';
+    return;
+  }
+  document.getElementById('authCard').hidden = true;
+  const area = document.getElementById('dataArea');
+  area.hidden = false;
+  const d = data.data;
+  const listHtml = (arr) => (arr || []).map(g => '<div>' + esc(g) + '</div>').join('');
+  area.innerHTML = `
+    <h1 style="color:var(--deep-sea)">后台数据</h1>
+    <div class="data-card"><h3>当前版本</h3><p>${esc((d.versionHistory && d.versionHistory.version) || d.appVersion)}（版本记录） · [app: ${esc(d.appVersion)}] · ${esc(d.generatedAt)}</p></div>
+    <div class="data-card"><h3>功能一览</h3><div class="guide">${listHtml(d.featureSummary)}</div></div>
+    <div class="data-card"><h3>迁移/续作说明</h3><div class="guide">${listHtml(d.continuationGuide)}</div></div>
+    <div class="data-card"><h3>核心文件说明</h3><div class="guide">${listHtml(d.coreFiles)}</div></div>
+    <div class="data-card"><h3>版本历史</h3><pre>${esc(JSON.stringify(d.versionHistory, null, 2))}</pre></div>
+    <div class="data-card"><h3>工作区文件清单</h3><pre>${esc(JSON.stringify(d.files, null, 2))}</pre></div>
+  `;
+}
+document.getElementById('authBtn').addEventListener('click', auth);
+document.getElementById('password').addEventListener('keydown', e => { if (e.key === 'Enter') auth(); });
+</script>
+<script src="contact.js"></script>
+</body>
+</html>

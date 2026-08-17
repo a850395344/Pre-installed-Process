@@ -1,0 +1,28 @@
+{
+  "name": "harness-preassembly-generator",
+  "version": "99.0.0",
+  "description": "四轮汽车线束后段预装工艺文件结构化生成器",
+  "main": "electron-main.js",
+  "scripts": {
+    "start": "node server.js",
+    "app": "electron .",
+    "dev": "node server.js",
+    "test": "node test/run.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^4.21.2",
+    "multer": "^2.0.2",
+    "pdf-parse": "^1.1.1",
+    "pdf-to-img": "^6.2.0",
+    "xlsx": "^0.18.5",
+    "xlsx-js-style": "^1.2.0"
+  },
+  "devDependencies": {
+    "electron": "^43.4.0",
+    "electron-packager": "^17.1.2"
+  }
+}

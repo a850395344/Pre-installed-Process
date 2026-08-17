@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI多模态图纸识别</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  .ai-page { max-width: 1000px; margin: 30px auto; padding: 0 20px; }
+  .ai-card { background: #fff; border: 1px solid var(--line); border-radius: 20px; padding: 26px; margin-bottom: 18px; box-shadow: var(--shadow); }
+  .ai-card h2 { color: var(--deep-sea); margin-top: 0; }
+  .ai-note { background: #f0f9ff; border: 1px solid #bae6fd; color: #0c4a6e; border-radius: 12px; padding: 14px 16px; line-height: 1.8; }
+  .ai-field { margin-bottom: 16px; }
+  .ai-field label { display: block; font-weight: 600; margin-bottom: 6px; color: var(--text-2); }
+  .ai-field input { width: 100%; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; font-size: 14px; }
+  .result-box { background: #f8fafc; border: 1px solid var(--line); border-radius: 12px; padding: 14px; max-height: 480px; overflow: auto; white-space: pre-wrap; font-size: 13px; }
+  .job-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px; background: #fbfcfe; }
+  .job-item button { border: none; background: var(--blue-soft); color: var(--blue); padding: 6px 14px; border-radius: 999px; cursor: pointer; font-weight: 700; }
+</style>
+</head>
+<body>
+<main class="ai-page">
+  <a class="btn" href="index.html">← 返回主页面</a>
+  <h1 style="color:var(--deep-sea)">AI多模态图纸识别</h1>
+
+  <div class="ai-card">
+    <h2>功能说明</h2>
+    <div class="ai-note">
+      1. 可上传 <strong>PDF 或图片</strong>（.pdf/.png/.jpg/.jpeg/.webp）；PDF 会自动转换为图片后交给视觉模型识别；<br>
+      2. <strong>必须使用多模态（视觉）模型</strong>（例如 gpt-4o、qwen-vl-max、gemini-1.5-pro 等），纯文本模型无法识别图纸；<br>
+      3. 大 PDF 会按页分批识别（每批最多4张图、约8MB），由模型通过 needMore 决定是否继续识别后续图纸，结果自动合并；<br>
+      4. 不选择文件时，自动使用主页上传的“工艺图纸PDF”；<br>
+      5. 识别任务提交后，即使关闭本页面，服务端仍会继续执行；重新打开可在“历史任务”查看结果；<br>
+      6. 该功能是可选功能。
+    </div>
+  </div>
+
+  <div class="ai-card">
+    <h2>调用 AI 识别</h2>
+    <div class="ai-field">
+      <label>图纸文件（PDF/图片，可选；不选则用主页上传的PDF）</label>
+      <input type="file" id="file" accept=".pdf,.png,.jpg,.jpeg,.webp">
+    </div>
+    <div class="ai-field">
+      <label>API 地址</label>
+      <input type="text" id="apiUrl" placeholder="例如 https://api.openai.com/v1/chat/completions">
+    </div>
+    <div class="ai-field">
+      <label>API Key</label>
+      <input type="password" id="apiKey" placeholder="请输入 API Key">
+    </div>
+    <div class="ai-field">
+      <label>模型名称</label>
+      <input type="text" id="model" placeholder="例如 gpt-4o / qwen-vl-max">
+    </div>
+    <button class="btn primary" id="runBtn">提交AI识别任务</button>
+    <div class="msg" id="msg" style="margin-top:12px;color:var(--text-2)"></div>
+  </div>
+
+  <div class="ai-card">
+    <h2>当前/最近任务</h2>
+    <div id="jobList">加载中……</div>
+  </div>
+
+  <div class="ai-card">
+    <h2>识别结果</h2>
+    <div class="result-box" id="result">尚未选择任务</div>
+  </div>
+</main>
+<footer class="footer" style="max-width:1000px;margin:0 auto;">
+  <p>四轮汽车线束后段预装工艺生成器 · MIT 开源协议 · 版权 © 2026 Dream · 制作者：Dream</p>
+  <p>开源项目地址：<a class="footer-link" href="https://gitee.com/yangchenzhao1/Pre-installed-Process" target="_blank" rel="noopener">https://gitee.com/yangchenzhao1/Pre-installed-Process</a>（点击在新窗口/浏览器中打开）</p>
+  <p>如有提议可在 <a class="footer-link" href="https://gitee.com/yangchenzhao1/Pre-installed-Process/issues" target="_blank" rel="noopener">Gitee Issues</a> 提出，或微信联系：<span class="wechat-link">Fedariovo-321</span>（点击弹出微信二维码）</p>
+  <p>当前版本 <span class="ver-chip" id="verCurrent">…</span> ｜ 最新版本 <span class="ver-chip" id="verLatest">…</span></p>
+</footer>
+<script>
+let currentJobId = null;
+let pollTimer = null;
+
+async function submitJob() {
+  const msg = document.getElementById('msg');
+  const apiUrl = document.getElementById('apiUrl').value.trim();
+  const apiKey = document.getElementById('apiKey').value.trim();
+  const model = document.getElementById('model').value.trim();
+  if (!apiUrl || !apiKey || !model) {
+    msg.textContent = '请填写API地址、API Key和模型名称';
+    return;
+  }
+  const fileInput = document.getElementById('file');
+  const fd = new FormData();
+  fd.append('apiUrl', apiUrl);
+  fd.append('apiKey', apiKey);
+  fd.append('model', model);
+  if (fileInput && fileInput.files && fileInput.files[0]) {
+    fd.append('file', fileInput.files[0]);
+  }
+  msg.textContent = '正在提交任务……';
+  try {
+    const resp = await fetch('/api/ai/analyze', { method: 'POST', body: fd });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || '提交失败');
+    currentJobId = data.jobId;
+    msg.textContent = '任务已提交，任务ID：' + currentJobId + '。你可以关闭页面，服务端会继续执行。';
+    startPoll(currentJobId);
+    loadJobs();
+  } catch (err) {
+    msg.textContent = '提交失败：' + err.message;
+  }
+}
+
+function startPoll(jobId) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const resp = await fetch('/api/ai/jobs/' + jobId);
+      const data = await resp.json();
+      if (data.status === 'done' || data.status === 'error') {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        document.getElementById('msg').textContent = data.status === 'done'
+          ? '识别完成（' + (data.result && data.result.source || '') + '）'
+          : '识别失败：' + (data.error || '');
+        if (data.status === 'done') {
+          const r = data.result || {};
+          document.getElementById('result').textContent = JSON.stringify(r.merged !== undefined ? r.merged : r, null, 2);
+        }
+        loadJobs();
+      } else if (data.progress && data.progress.total) {
+        document.getElementById('msg').textContent = '识别中：第 ' + data.progress.done + ' / ' + data.progress.total + ' 批（图纸 ' + (data.progress.pages || '') + ' 页）……';
+      }
+    } catch {}
+  }, 2000);
+}
+
+async function loadJobs() {
+  try {
+    const resp = await fetch('/api/ai/jobs');
+    const data = await resp.json();
+    const box = document.getElementById('jobList');
+    if (!data.jobs.length) {
+      box.innerHTML = '暂无任务';
+      return;
+    }
+    box.innerHTML = data.jobs.map(j => `
+      <div class="job-item">
+        <span><strong>${j.id}</strong> · ${j.status} · ${j.createdAt}</span>
+        <button onclick="viewJob('${j.id}')">查看</button>
+      </div>
+    `).join('');
+  } catch {}
+}
+
+async function viewJob(jobId) {
+  const resp = await fetch('/api/ai/jobs/' + jobId);
+  const data = await resp.json();
+  currentJobId = jobId;
+  document.getElementById('result').textContent = data.status === 'done'
+    ? JSON.stringify(data.result, null, 2)
+    : (data.error || data.status);
+  if (data.status === 'running') startPoll(jobId);
+}
+
+document.getElementById('runBtn').addEventListener('click', submitJob);
+loadJobs();
+</script>
+<script src="contact.js"></script>
+</body>
+</html>

@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>四轮汽车线束后段预装工艺文件生成器</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">预装</div>
+      <div>
+        <h1>四轮汽车线束后段预装工艺文件生成器</h1>
+        <p>标准工时 / EBOM / MBOM / 工艺PDF → 结构化预装工艺数据包</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <a class="btn" href="ai.html">AI多模态</a>
+      <a class="btn" href="version.html">版本记录</a>
+      <a class="btn" href="backend.html">后台数据</a>
+      <button id="checkUpdateBtn" class="btn" type="button">检查更新</button>
+      <button id="exportBtn" class="btn" disabled>导出结构化数据包</button>
+      <button id="exportProcessBtn" class="btn primary" disabled>导出预装工艺岗位表</button>
+      <button id="exportReviewBtn" class="btn primary" disabled>导出人工核查表</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="setup-card">
+      <div class="step-title">
+        <span>STEP 1</span>
+        <h2>放入项目资料</h2>
+        <p>标注 <em>必填</em> 的文件必须上传；PDF用于图纸文本提取与关键词核对。</p>
+      </div>
+
+      <div class="file-grid">
+        <div class="file-drop" data-field="standard" data-label="标准工时文件" data-required="true">
+          <input type="file" id="standard" accept=".xlsx,.xls" hidden>
+          <button class="file-clear" type="button" data-clr="standard" title="删除该文件" hidden>✕</button>
+          <div class="drop-icon">⏱</div>
+          <strong><span class="req-star">*</span>标准工时文件</strong>
+          <small class="required">必填 .xlsx</small>
+          <span class="file-name">未选择</span>
+        </div>
+
+        <div class="file-drop" data-field="ebom" data-label="EBOM文件" data-required="true">
+          <input type="file" id="ebom" accept=".xlsx,.xls" hidden>
+          <button class="file-clear" type="button" data-clr="ebom" title="删除该文件" hidden>✕</button>
+          <div class="drop-icon">📦</div>
+          <strong><span class="req-star">*</span>EBOM文件</strong>
+          <small class="required">必填 .xlsx</small>
+          <span class="file-name">未选择</span>
+        </div>
+
+        <div class="file-drop" data-field="mbom" data-label="MBOM文件" data-required="true">
+          <input type="file" id="mbom" accept=".xlsx,.xls" hidden>
+          <button class="file-clear" type="button" data-clr="mbom" title="删除该文件" hidden>✕</button>
+          <div class="drop-icon">🔌</div>
+          <strong><span class="req-star">*</span>MBOM/Cutting文件</strong>
+          <small class="required">必填 .xlsx</small>
+          <span class="file-name">未选择</span>
+        </div>
+
+        <div class="file-drop" data-field="pdf" data-label="工艺图纸PDF">
+          <input type="file" id="pdf" accept=".pdf" hidden>
+          <button class="file-clear" type="button" data-clr="pdf" title="删除该文件" hidden>✕</button>
+          <div class="drop-icon">📄</div>
+          <strong>工艺图纸PDF</strong>
+          <small>可选 .pdf</small>
+          <span class="file-name">未选择</span>
+        </div>
+      </div>
+
+      <div class="file-actions">
+        <span class="file-actions-hint">已上传的文件可逐项删除或一键清空（不影响你本机原始文件）</span>
+        <button id="clearAllFiles" class="btn" type="button">清空已上传文件</button>
+      </div>
+
+      <div class="options-row">
+        <label class="tt-field" data-required="true">
+          <span><span class="req-star">*</span>目标节拍 TT（秒/件）</span>
+          <input type="number" id="tt" min="0" step="any" placeholder="例如 120">
+        </label>
+        <button id="analyzeFilesBtn" class="btn big" type="button">分析文件</button>
+        <button id="analyzeBtn" class="btn primary big" type="button" disabled>开始解析生成</button>
+      </div>
+
+      <div class="plan-card">
+        <div class="step-title">
+          <span>STEP 2</span>
+          <h2>工艺策划参数</h2>
+          <p>选择本次要制作的<strong>单个部位</strong>、最大预装岗位数、预装模式和是否有在线超声波；这些参数用于生成预装工艺岗位表。</p>
+        </div>
+
+        <div class="region-group">
+          <div class="group-label">制作部位（单选，一份文件对应一个部位）<span style="font-weight:400;color:var(--text-3);font-size:12px">（用于工艺域标识与岗位命名；一份MBOM/工艺图纸即对应所选部位，不做按部位过滤、不改变分工艺算法）</span></div>
+          <div class="region-checkboxes">
+            <label><input type="radio" name="region" value="车身线束"> 车身线束</label>
+            <label><input type="radio" name="region" value="仪表线束"> 仪表线束</label>
+            <label><input type="radio" name="region" value="前舱线束"> 前舱线束</label>
+            <label><input type="radio" name="region" value="发动机线束"> 发动机线束</label>
+            <label><input type="radio" name="region" value="左前门线束"> 左前门线束</label>
+            <label><input type="radio" name="region" value="右前门线束"> 右前门线束</label>
+            <label><input type="radio" name="region" value="左后门线束"> 左后门线束</label>
+            <label><input type="radio" name="region" value="右后门线束"> 右后门线束</label>
+            <label><input type="radio" name="region" value="顶棚线束"> 顶棚线束</label>
+            <label><input type="radio" name="region" value="前保险杠线束"> 前保险杠线束</label>
+            <label><input type="radio" name="region" value="后保险杠线束"> 后保险杠线束</label>
+          </div>
+        </div>
+
+        <div class="plan-fields">
+          <label class="tt-field">
+            <span>最多预装岗位数<span style="font-weight:400;color:var(--text-3);font-size:12px">（可不填，留空按TT自动计算；也可填作上限，TT需要更多时自动扩岗）</span></span>
+            <input type="number" id="maxStations" min="1" step="1" placeholder="留空自动 / 例如 8">
+          </label>
+
+          <label class="tt-field" data-required="true">
+            <span><span class="req-star">*</span>预装模式</span>
+            <select id="preassemblyMode" class="custom-select">
+              <option value="">请选择预装模式</option>
+              <option value="pure-kit">纯KIT岗位</option>
+              <option value="kit-transfer-kit">KIT传递岗+KIT岗位</option>
+              <option value="pure-sub">纯SUB岗位</option>
+              <option value="sub-kit">SUB岗位+纯KIT岗位</option>
+              <option value="sub-kit-transfer">SUB岗位+纯KIT岗位+KIT传递岗位</option>
+            </select>
+          </label>
+
+          <label class="tt-field">
+            <span>是否有在线超声波</span>
+            <select id="onlineUltrasonic" class="custom-select">
+              <option value="no">否</option>
+              <option value="yes">是</option>
+            </select>
+          </label>
+
+          <label class="tt-field" id="fieldOnlineUltrasonicMaxGroupsPerConfig">
+            <span>单配置在线超声波最高组数</span>
+            <input type="number" id="onlineUltrasonicMaxGroupsPerConfig" min="1" step="1" placeholder="例如 30" disabled>
+          </label>
+
+          <label class="tt-field" id="fieldOnlineUltrasonicMaxTotalGroups">
+            <span>在线超声波最高总组数限制</span>
+            <input type="number" id="onlineUltrasonicMaxTotalGroups" min="1" step="1" placeholder="例如 80" disabled>
+          </label>
+
+          <label class="tt-field" id="fieldMaxSubFrames">
+            <span>每个SUB组最多几个预装</span>
+            <input type="number" id="maxSubFrames" min="1" step="1" placeholder="例如 8">
+          </label>
+
+          <label class="tt-field" id="fieldLoopSingleKit">
+            <span>单KIT打圈工时（秒）</span>
+            <input type="number" id="loopSingleKit" min="0" step="1" placeholder="例如 50">
+          </label>
+
+          <label class="tt-field" id="fieldLoopKitTransferMiddle">
+            <span>KIT传递岗中间岗位打圈工时（秒）</span>
+            <input type="number" id="loopKitTransferMiddle" min="0" step="1" placeholder="例如 40">
+          </label>
+
+          <label class="tt-field" id="fieldLoopKitTransferLast">
+            <span>KIT传递岗最后岗位打圈工时（秒）</span>
+            <input type="number" id="loopKitTransferLast" min="0" step="1" placeholder="例如 60">
+          </label>
+
+          <label class="tt-field" id="fieldLoopSubLast">
+            <span>SUB最后岗位打圈工时（秒）</span>
+            <input type="number" id="loopSubLast" min="0" step="1" placeholder="例如 55">
+          </label>
+        </div>
+      </div>
+
+      <div class="plan-card" id="grommetPanel">
+        <div class="step-title">
+          <span>STEP 2.5</span>
+          <h2>胶套专属岗位（可选）</h2>
+          <p>按行输入胶套名称、胶套后面的护套、安装防水泥和胶套的时间（秒）。一个胶套后面可跟多个护套。</p>
+        </div>
+        <div class="table-wrap" style="margin-top:14px">
+          <table>
+            <thead>
+              <tr>
+                <th>胶套名称</th>
+                <th>胶套后面的护套（多个用逗号分隔）</th>
+                <th>安装防水泥和胶套时间（秒）</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="grommetRows"></tbody>
+          </table>
+        </div>
+        <button class="btn" type="button" id="addGrommetRow" style="margin-top:12px">添加一行</button>
+      </div>
+
+      <div id="analysisPanel" class="plan-card" hidden>
+        <div class="step-title">
+          <span>STEP 3</span>
+          <h2>文件分析结果与限制输入</h2>
+          <p>先点击“分析文件”，再根据分析结果填写：①不能上在线超声波的SP/SC压接点、②强制线下插接的护套、③同岗位护套分组（后两项可留空）。</p>
+        </div>
+        <div id="analysisValidation"></div>
+        <div id="analysisSummary" class="analysis-summary"></div>
+        <div class="constraint-grid">
+          <div class="constraint-card">
+            <div class="constraint-title"><span class="constraint-tag" style="background:var(--orange)">①</span><span>不能上在线超声波的SP/SC压接点（需热缩管）</span></div>
+            <textarea id="noOnlineUltrasonicSplices" rows="4" placeholder="多个用逗号/换行分隔，例如：SP030,SP042,SC050"></textarea>
+            <div class="constraint-hint">可留空。填写后这些压接点即使满足在线条件也强制走热缩管、离线作业，不会排入在线超声波。</div>
+          </div>
+          <div class="constraint-card">
+            <div class="constraint-title"><span class="constraint-tag" style="background:var(--blue)">②</span><span>强制线下插接完毕的护套</span></div>
+            <textarea id="forcedOfflineHousings" rows="4" placeholder="多个用逗号/换行分隔，例如：W25LH1,B601E1"></textarea>
+            <div class="constraint-hint">可留空。填写后这些护套的所有插接在对应岗位提前完成，不再留到主线后续工位。</div>
+          </div>
+        </div>
+        <div class="sub-section-title">③ 同岗位护套分组（可选）</div>
+        <div class="sub-section-desc">一组护套=一个岗位；点“添加一组”新建的组就是另一个岗位，每组可选择岗位类型（纯KIT / KIT传递 / SUB）。</div>
+        <div class="table-wrap ssg-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>组名（可填）</th>
+                <th>护套列表（逗号/换行分隔）</th>
+                <th>岗位类型</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="sameStationGroupRows"></tbody>
+          </table>
+        </div>
+        <button class="btn" type="button" id="addSameStationGroup" style="margin-top:10px">添加一组</button>
+        <div class="overtt-title">组超过节拍（TT）时的拆分方式</div>
+        <div class="overtt-options">
+          <label class="radio-card">
+            <input type="radio" name="sameStationOverTtMode" value="force-same" checked>
+            <span class="radio-text">
+              <strong>① 强制同岗（默认）</strong>
+              <span class="radio-desc">即使合并后超过节拍，也把这些护套强行保留在同一个岗位；超出部分由岗位表标记【超TT】供人工调整。</span>
+            </span>
+          </label>
+          <label class="radio-card">
+            <input type="radio" name="sameStationOverTtMode" value="best-rate">
+            <span class="radio-text">
+              <strong>② 按最佳插接率拆分</strong>
+              <span class="radio-desc">超过节拍时按负载把该组拆成多个岗位，优先把用户填入的护套尽量放在同一岗位；拆分结果输出到“同岗位分组节拍处理”工作表。</span>
+            </span>
+          </label>
+        </div>
+        <div id="analysisLists" class="analysis-lists"></div>
+      </div>
+
+      <div class="template-row">
+        <span>没有文件？先下载模板参考制作：</span>
+        <button class="btn" type="button" data-template="standard">下载标准工时模板</button>
+        <button class="btn" type="button" data-template="ebom">下载EBOM模板</button>
+        <button class="btn" type="button" data-template="mbom">下载MBOM/Cutting模板</button>
+      </div>
+
+      <div id="status" class="status" hidden></div>
+    </section>
+
+    <section id="result" class="result" hidden>
+      <div class="summary-cards" id="summaryCards"></div>
+
+      <div class="tabs" id="tabs"></div>
+
+      <div id="panel" class="panel"></div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>规则基线：四轮汽车线束后段预装工艺 V2.6.1 摘要（工作包、护套关联、受控半成品、同色线八色编码、正式工时与TT）。所有输出默认状态为【候选方案，待工艺验证】。</p>
+    <p>AI多模态接口已预留：用于读取PDF图纸并返回结构化数据；PDF图纸上传为非必选项。</p>
+    <p>本项目基于 <strong>MIT 开源协议</strong> 开源 · 版权 © 2026 Dream · 制作者：Dream</p>
+    <p>开源项目地址：<a class="footer-link" href="https://gitee.com/yangchenzhao1/Pre-installed-Process" target="_blank" rel="noopener">https://gitee.com/yangchenzhao1/Pre-installed-Process</a>（点击在新窗口/浏览器中打开）</p>
+    <p>如有提议可在 <a class="footer-link" href="https://gitee.com/yangchenzhao1/Pre-installed-Process/issues" target="_blank" rel="noopener">Gitee Issues</a> 提出，或微信联系：<span class="wechat-link">Fedariovo-321</span>（点击弹出微信二维码）</p>
+    <p>当前版本 <span class="ver-chip" id="verCurrent">…</span> ｜ 最新版本 <span class="ver-chip" id="verLatest">…</span></p>
+  </footer>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="app.js"></script>
+  <script src="contact.js"></script>
+</body>
+</html>
