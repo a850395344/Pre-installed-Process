@@ -620,8 +620,19 @@ function buildPackages(wires, configs, entries, tt) {
   const w1DirectPool = [];
   for (const group of groups.values()) {
     if (group.kind === "W1直挂") { w1DirectPool.push(...group.wires); continue; }
+    // W3/W2 看板组：默认整组成一个候选包；若该组“工作总量”超过预算，则同样按“护套关联+工时封顶”拆成多个候选包，
+    // 避免出现超大 W3/W2 组合整包超TT（如 100+ 线 / 上千秒）。
     seq += 1;
-    packages.push(mkPkg(group.wires, seq, group.kind, group.name, group.key));
+    const groupEffort = group.wires.reduce((a, w) => a + (computeWireEffort(w, entries).wireTime || 0), 0);
+    if (groupEffort > pkgBudget && group.wires.length > 1) {
+      const sub = clusterWiresByHousing(group.wires, entries, pkgBudget);
+      for (const c of sub) {
+        seq += 1;
+        packages.push(mkPkg(c.wires, seq, group.kind + "-工时拆分", `${group.name}(拆分)`, group.key));
+      }
+    } else {
+      packages.push(mkPkg(group.wires, seq, group.kind, group.name, group.key));
+    }
   }
   // W1直挂 → 按护套关联聚合成候选工作包
   const clusters = clusterWiresByHousing(w1DirectPool, entries, pkgBudget);
