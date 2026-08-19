@@ -35,7 +35,7 @@ function addGrommetRow(name = "", housings = "", time = "") {
   const tr = document.createElement("tr");
   tr.innerHTML = `
     <td><input class="grommet-name" value="${name}" placeholder="例如 G01"></td>
-    <td><input class="grommet-housings" value="${housings}" placeholder="例如 W25LH1,B601E1"></td>
+    <td><input class="grommet-housings" value="${housings}" placeholder="例如 W25LH1/B601E1"></td>
     <td><input class="grommet-time" type="number" min="0" step="1" value="${time}" placeholder="秒"></td>
     <td><button class="btn" type="button">删除</button></td>
   `;
@@ -61,7 +61,7 @@ function addSameStationGroupRow(name = "", housings = "", mode = "pure-kit") {
   ].map(([v, l]) => `<option value="${v}"${mode === v ? " selected" : ""}>${l}</option>`).join("");
   tr.innerHTML = `
     <td><input class="ssg-name" value="${name}" placeholder="例如 左前门接口"></td>
-    <td><input class="ssg-housings" value="${housings}" placeholder="例如 W25LH1,B601E1"></td>
+    <td><input class="ssg-housings" value="${housings}" placeholder="例如 W25LH1/B601E1"></td>
     <td><select class="ssg-mode">${modeOptions}</select></td>
     <td><button class="btn" type="button">删除</button></td>
   `;
@@ -681,7 +681,7 @@ async function analyzeFiles() {
 }
 
 function splitInput(value) {
-  return String(value || "").split(/[\n,，;；]+/).map((s) => s.trim()).filter(Boolean);
+  return String(value || "").split(/[/\n,，;；]+/).map((s) => s.trim()).filter(Boolean);
 }
 
 function validateLimitInputs() {

@@ -213,7 +213,7 @@
             <thead>
               <tr>
                 <th>胶套名称</th>
-                <th>胶套后面的护套（多个用逗号分隔）</th>
+                <th>胶套后面的护套（多个用 / 分隔）</th>
                 <th>安装防水泥和胶套时间（秒）</th>
                 <th>操作</th>
               </tr>
@@ -235,12 +235,12 @@
         <div class="constraint-grid">
           <div class="constraint-card">
             <div class="constraint-title"><span class="constraint-tag" style="background:var(--orange)">①</span><span>不能上在线超声波的SP/SC压接点（需热缩管）</span></div>
-            <textarea id="noOnlineUltrasonicSplices" rows="4" placeholder="多个用逗号/换行分隔，例如：SP030,SP042,SC050"></textarea>
+            <textarea id="noOnlineUltrasonicSplices" rows="4" placeholder="多个用 / 分隔，例如：SP030/SP042/SC050"></textarea>
             <div class="constraint-hint">可留空。填写后这些压接点即使满足在线条件也强制走热缩管、离线作业，不会排入在线超声波。</div>
           </div>
           <div class="constraint-card">
             <div class="constraint-title"><span class="constraint-tag" style="background:var(--blue)">②</span><span>强制线下插接完毕的护套</span></div>
-            <textarea id="forcedOfflineHousings" rows="4" placeholder="多个用逗号/换行分隔，例如：W25LH1,B601E1"></textarea>
+            <textarea id="forcedOfflineHousings" rows="4" placeholder="多个用 / 分隔，例如：W25LH1/B601E1"></textarea>
             <div class="constraint-hint">可留空。填写后这些护套的所有插接在对应岗位提前完成，不再留到主线后续工位。</div>
           </div>
         </div>
@@ -251,7 +251,7 @@
             <thead>
               <tr>
                 <th>组名（可填）</th>
-                <th>护套列表（逗号/换行分隔）</th>
+                <th>护套列表（用 / 或换行分隔）</th>
                 <th>岗位类型</th>
                 <th>操作</th>
               </tr>

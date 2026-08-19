@@ -1184,7 +1184,7 @@ const GROUP_MODE_ALLOWED_BY_GLOBAL = {
 function parseSameStationGroups(groups, issues) {
   const parsed = [];
   (groups || []).forEach((g, gi) => {
-    const housings = new Set(String((g && g.housings) || "").split(/[,，;；\n\r]+/).map(clean).filter(Boolean));
+    const housings = new Set(String((g && g.housings) || "").split(/[/，,；;\n\r]+/).map(clean).filter(Boolean));
     if (!housings.size) return;
     const mode = g && g.mode && GROUP_MODE_LABELS[g.mode] ? g.mode : "pure-kit";
     parsed.push({
@@ -1871,11 +1871,48 @@ function buildStationDotMatrix(stationDetails) {
   return { rows, issues };
 }
 
+// ==================== 胶套后护套“必须满插”校验（强制审核项） ====================
+// 胶套一装上就看不到/够不到里面，故胶套后面的护套必须在“强制线下”把全部孔位插接完毕（满插）。
+// 本函数按“该护套每一个导线端是否都填写了孔位”做最严信号校验：凡有端缺孔位 → 未满插【待确认】。
+function buildGrommetFullInsertChecks(grommetStations, wires) {
+  const issues = [];
+  const endsByHousing = new Map(); // h -> [{pos,w1}]
+  for (const w of wires) {
+    for (const [h, pos, w1] of [[w.housing1, w.position1, w.w1 || w.drawingId], [w.housing2, w.position2, w.w1 || w.drawingId]]) {
+      const hh = clean(h);
+      if (!hh || hh === "-" || isSpliceCode(hh)) continue;
+      if (!endsByHousing.has(hh)) endsByHousing.set(hh, []);
+      endsByHousing.get(hh).push({ pos: clean(pos), w1 });
+    }
+  }
+  for (const g of grommetStations || []) {
+    const gName = clean(g.name);
+    const hs = String(g.housings || "").split(/[/，,；;\n\r]+/).map(clean).filter(Boolean);
+    for (const h of hs) {
+      const ends = endsByHousing.get(h) || [];
+      if (!ends.length) {
+        issues.push({ category: "胶套后护套满插", detail: `胶套【${gName}】后面的护套【${h}】未在MBOM导线中识别到，无法校验满插，请确认护套编号与图纸一致。` });
+        continue;
+      }
+      const blank = ends.filter((e) => !e.pos);
+      if (blank.length) {
+        issues.push({
+          category: "胶套后护套满插",
+          detail: `胶套【${gName}】后面的护套【${h}】有 ${blank.length} 个导线端未填写孔位（未满插）【待确认】；胶套后护套必须满插（强制线下插接完毕）。涉及导线：${uniq(blank.slice(0, 8).map((e) => e.w1)).join("、")}${blank.length > 8 ? "…" : ""}`
+        });
+      } else {
+        issues.push({ category: "胶套后护套满插", detail: `胶套【${gName}】后面的护套【${h}】共 ${ends.length} 个导线端均已填写孔位（视为已满插、强制线下插接完毕）；请现场确认全部孔位确实已插接后关闭。` });
+      }
+    }
+  }
+  return issues;
+}
+
 function buildGrommetStations(grommetStations, region, configs, startNo, loopSeconds = 0, tt = 0) {
   return (grommetStations || []).map((g, i) => {
     const no = startNo + i;
     const name = `${String(no).padStart(2, "0")}-${region || "未指定"}-胶套-${clean(g.name)}`;
-    const housings = String(g.housings || "").split(/[,，;；]+/).map(clean).filter(Boolean);
+    const housings = String(g.housings || "").split(/[/，,；;\n\r]+/).map(clean).filter(Boolean);
     const time = Number(g.time) || 0;
     // 胶套专属岗位为固定式KIT类输出岗位，会产出受控半成品（装好的胶套/防水泥），按“单KIT打圈值”计一次打圈；
     // 打圈按岗位计、与岗内人数无关；未填写打圈值则 loopSeconds=0（不强制）。
@@ -1968,7 +2005,7 @@ async function analyzeProject(files, options = {}) {
   }
   const grommetStations = Array.isArray(options.grommetStations) ? options.grommetStations.filter((g) => g && g.name && String(g.housings || "").trim()) : [];
   for (const g of grommetStations) {
-    const hs = String(g.housings || "").split(/[,，;；]+/).map(clean).filter(Boolean);
+    const hs = String(g.housings || "").split(/[/，,；;\n\r]+/).map(clean).filter(Boolean);
     for (const h of hs) {
       if (!forcedOfflineHousings.includes(h)) forcedOfflineHousings.push(h);
     }
@@ -2112,6 +2149,8 @@ async function analyzeProject(files, options = {}) {
     issues.push({ category: "特殊线束合并", detail: w.detail });
   }
   issues.push(...groupIssues);
+  // 胶套后护套“必须满插”校验（强制审核项）
+  for (const gi of buildGrommetFullInsertChecks(grommetStations, wires)) issues.push(gi);
 
   // 限制输入命中校验：未匹配到MBOM识别清单的强制提示（不静默忽略）
   const knownSpliceCodes = new Set((fileAnalysis.spliceList || []).map((s) => s.code));

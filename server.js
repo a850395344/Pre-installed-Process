@@ -122,7 +122,8 @@ function deleteGenHistory(id) {
 function parseList(value) {
   if (!value) return [];
   if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean);
-  return String(value).split(/[\n,，;；]+/).map((s) => s.trim()).filter(Boolean);
+  // 多值统一用 “/” 分隔（兼容历史逗号/换行）
+  return String(value).split(/[/\n,，;；]+/).map((s) => s.trim()).filter(Boolean);
 }
 
 const PORT_FILE = path.join(__dirname, "data", "port.json");
