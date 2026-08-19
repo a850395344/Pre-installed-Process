@@ -484,21 +484,33 @@ function computeWireEffort(w, entries) {
   };
 }
 
-// 把一组导线按“护套关联重叠”聚类，并用“累计工时封顶”收口（忽略SP/SC焊点与空端）。
-function clusterWiresByHousing(wires, entries, budget) {
-  const pkgs = []; // {housings:Set, wires:[], time:0}
+// 把一组导线按“护套关联 + 焊点关联”聚类，并用“累计工时封顶”收口。
+// 【在线超声波串联】：
+//   - 在线焊点（可在线超声波）：导线可先分别布线/插接、总装线上现焊 → 不因该焊点强朴，可分散到不同候选包；
+//   - 离线/需热缩焊点（不可在线）：这些导线要优先在焊接工位焊成整体再走 → 以其焊点(SP/SC)为聚点把这些导线聚在同一候选包。
+function clusterWiresByHousing(wires, entries, budget, ultrasonicCtx) {
+  const onlineCodes = (ultrasonicCtx && ultrasonicCtx.online) ? (ultrasonicCtx.onlineCodes || new Set()) : new Set();
+  const pkgs = []; // {housings:Set, splices:Set, wires:[], time:0}
   const sorted = wires.slice().sort((a, b) => computeWireEffort(b, entries).wireTime - computeWireEffort(a, entries).wireTime);
   for (const w of sorted) {
     const eff = computeWireEffort(w, entries);
     const wt = eff.wireTime || 1;
     const hs = [clean(w.housing1), clean(w.housing2)].filter((h) => h && h !== "-" && !isSpliceCode(h));
-    if (!hs.length) { pkgs.push({ housings: new Set(), wires: [w], time: wt }); continue; }
+    const offSpl = [clean(w.housing1), clean(w.housing2)]
+      .map(clean).filter((h) => h && isSpliceCode(h) && !onlineCodes.has(h));
+    if (!hs.length && !offSpl.length) { pkgs.push({ housings: new Set(), splices: new Set(), wires: [w], time: wt }); continue; }
     let target = null;
     for (const p of pkgs) {
       if (hs.some((h) => p.housings.has(h)) && (p.time + wt) <= budget) { target = p; break; }
     }
-    if (!target) { target = { housings: new Set(), wires: [], time: 0 }; pkgs.push(target); }
-    for (const h of hs) target.housings.add(h);
+    if (!target) {
+      for (const p of pkgs) {
+        if (offSpl.some((s) => p.splices.has(s)) && (p.time + wt) <= budget) { target = p; break; }
+      }
+    }
+    if (!target) { target = { housings: new Set(), splices: new Set(), wires: [], time: 0 }; pkgs.push(target); }
+    hs.forEach((h) => target.housings.add(h));
+    offSpl.forEach((s) => target.splices.add(s));
     target.wires.push(w);
     target.time += wt;
   }
@@ -512,7 +524,7 @@ function clusterWiresByHousing(wires, entries, budget) {
 //   兼顾“包不过碎”与“尽量不超节拍”（实测 TT120 → 单根包26%、超TT约5/109）。
 const B1_PKG_TIME_BUDGET_FRAC = 0.6;
 const B1_PKG_TIME_BUDGET_MIN = 30;
-function buildPackages(wires, configs, entries, tt) {
+function buildPackages(wires, configs, entries, tt, ultrasonicCtx = null) {
   const pkgBudget = tt && tt > 0 ? Math.max(B1_PKG_TIME_BUDGET_MIN, Math.round(tt * B1_PKG_TIME_BUDGET_FRAC)) : 80;
   const mkPkg = (ws, seq, kind, name, key) => {
     const housingMap = new Map();
@@ -625,7 +637,7 @@ function buildPackages(wires, configs, entries, tt) {
     seq += 1;
     const groupEffort = group.wires.reduce((a, w) => a + (computeWireEffort(w, entries).wireTime || 0), 0);
     if (groupEffort > pkgBudget && group.wires.length > 1) {
-      const sub = clusterWiresByHousing(group.wires, entries, pkgBudget);
+      const sub = clusterWiresByHousing(group.wires, entries, pkgBudget, ultrasonicCtx);
       for (const c of sub) {
         seq += 1;
         packages.push(mkPkg(c.wires, seq, group.kind + "-工时拆分", `${group.name}(拆分)`, group.key));
@@ -635,7 +647,7 @@ function buildPackages(wires, configs, entries, tt) {
     }
   }
   // W1直挂 → 按护套关联聚合成候选工作包
-  const clusters = clusterWiresByHousing(w1DirectPool, entries, pkgBudget);
+  const clusters = clusterWiresByHousing(w1DirectPool, entries, pkgBudget, ultrasonicCtx);
   for (const c of clusters) {
     seq += 1;
     const rep = c.housings && c.housings.size ? [...c.housings][0] : (c.wires[0] && (c.wires[0].w1 || c.wires[0].drawingId)) || "散线";
@@ -1977,8 +1989,15 @@ async function analyzeProject(files, options = {}) {
   };
   const fileAnalysis = buildFileAnalysis(mergedMbom);
   const ultrasonicRules = buildUltrasonicRules(wires, configs, noOnlineUltrasonicSplices, onlineUltrasonicMaxGroupsPerConfig, onlineUltrasonicMaxTotalGroups);
+  // 【在线超声波串联】：把“能在线超声波”的焊点集合算出来，传入预装拆分，
+  // 使离线/需热缩焊点的导线按焊点聚在一起（先焊再走），在线焊点的导线可分开（先别布线、总装线上现焊）。
+  const onlineSpliceCodes = onlineUltrasonic
+    ? new Set(Object.values((ultrasonicRules && ultrasonicRules.allowedByConfig) || {}).flat().filter((c) => !((ultrasonicRules && ultrasonicRules.blockedByLimitTotal) || []).includes(c)))
+    : new Set();
+  if (ultrasonicRules) ultrasonicRules.onlineSpliceCodes = [...onlineSpliceCodes];
+  const ultrasonicCtx = { online: onlineUltrasonic, onlineCodes: onlineSpliceCodes };
   const wireRows = buildWireRows(wires);
-  const packages = buildPackages(wires, configs, standard.entries, tt);
+  const packages = buildPackages(wires, configs, standard.entries, tt, ultrasonicCtx);
   const housingMatrix = buildHousingMatrix(wires, packages);
   const positionRows = buildPositionMatrix(packages);
   const timeRows = buildTimeMatrix(packages, configs, tt);
