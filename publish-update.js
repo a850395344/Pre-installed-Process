@@ -32,6 +32,15 @@ if (!owner || !repo) {
   process.exit(1);
 }
 
+// ---- 先把发布版本号写入 package.json —— 必须在“打包”之前完成：
+//      否则打进 update.zip 的 package.json 仍是旧版本号，用户更新后用上新代码，
+//      但 /api/update/check 读到旧版本，会一直提示“有新版本、请更新”，形成死循环。 ----
+{
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
+  pkg.version = newVersion;
+  fs.writeFileSync(path.join(ROOT, "package.json"), JSON.stringify(pkg, null, 2) + "\n", "utf8");
+}
+
 // ---- 收集要发布的源码文件（排除 node_modules/dist/敏感数据/大文件） ----
 const tmpRoot = path.join(ROOT, "_publish_tmp");
 const tmpUpdate = path.join(tmpRoot, "update");
@@ -56,7 +65,7 @@ function copyFile(sp, rel) {
 }
 
 // 根文件 + src + public
-for (const item of ["server.js", "electron-main.js", "package.json", "package-lock.json", "LICENSE", "README.md", "src", "public"]) {
+for (const item of ["server.js", "electron-main.js", "preload.js", "package.json", "package-lock.json", "LICENSE", "README.md", "src", "public"]) {
   const sp = path.join(ROOT, item);
   if (!fs.existsSync(sp)) continue;
   if (fs.statSync(sp).isDirectory()) copyDir(sp, item);
@@ -78,13 +87,6 @@ const zipBuf = fs.readFileSync(zipPath);
 const sha256 = crypto.createHash("sha256").update(zipBuf).digest("hex");
 const pkgUrl = `https://gitee.com/${owner}/${repo}/raw/${branch}/update.zip`;
 fs.writeFileSync(path.join(OUT_DIR, "version.json"), JSON.stringify({ version: newVersion, notes, downloadUrl: pkgUrl, sha256 }, null, 2) + "\n", "utf8");
-
-// 顺带把 package.json version 更新为发布版本
-const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
-if (pkg.version !== newVersion) {
-  pkg.version = newVersion;
-  fs.writeFileSync(path.join(ROOT, "package.json"), JSON.stringify(pkg, null, 2) + "\n", "utf8");
-}
 
 fs.rmSync(tmpRoot, { recursive: true, force: true });
 

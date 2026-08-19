@@ -1,6 +1,6 @@
 "use strict";
 
-const { app, BrowserWindow, shell } = require("electron");
+const { app, BrowserWindow, shell, ipcMain } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const http = require("http");
@@ -75,7 +75,8 @@ function createWindow() {
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      preload: path.join(__dirname, "preload.js")
     }
   });
 
@@ -109,4 +110,15 @@ app.on("window-all-closed", () => {
     serverProcess = null;
   }
   app.quit();
+});
+
+// 更新完成后的“立即重启”：先结束内嵌 server（停掉旧代码进程），再 relaunch 应用，
+// 新实例启动时会自动应用 data/pending_update 里的更新包。
+ipcMain.on("app-relaunch", () => {
+  if (serverProcess) {
+    try { serverProcess.kill(); } catch {}
+    serverProcess = null;
+  }
+  app.relaunch();
+  app.exit(0);
 });

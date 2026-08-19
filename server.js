@@ -709,6 +709,11 @@ app.get("/api/update/check", async (req, res) => {
 const PENDING_DIR = path.join(__dirname, "data", "pending_update");
 const APP_ROOT = __dirname; // resources/app（server.js 所在目录即应用根）
 
+// 更新下载任务（供前端轮询进度）
+const updateJobs = new Map();
+let updateJobSeq = 1;
+let updateRestartRequested = false;
+
 // 把 src 目录内容整体覆盖到 dest（不删除目标中多余的既有文件）
 function copyOverlay(src, dest) {
   for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
@@ -757,26 +762,93 @@ function applyPendingUpdate() {
   }
 }
 
-// 下载更新包到待更新目录（本进程继续跑旧代码；下次重启时 applyPendingUpdate 覆盖）
-app.post("/api/update/download", async (req, res) => {
+// 下载更新包到待更新目录（带进度任务；下载完成并写入待更新包，重启后 applyPendingUpdate 覆盖）。
+// 本进程继续跑旧代码；只有重启才能切换新代码与新版本号。
+app.post("/api/update/download", (req, res) => {
   try {
     const { downloadUrl, sha256, targetVersion } = req.body || {};
     if (!downloadUrl) return res.status(400).json({ error: "缺少 downloadUrl" });
-    const r = await fetch(downloadUrl);
-    if (!r.ok) return res.status(400).json({ error: `下载更新包失败（HTTP ${r.status}）` });
-    const buf = Buffer.from(await r.arrayBuffer());
-    if (sha256) {
-      const hash = crypto.createHash("sha256").update(buf).digest("hex");
-      if (hash !== sha256) return res.status(400).json({ error: "更新包 sha256 校验失败" });
-    }
-    fs.mkdirSync(PENDING_DIR, { recursive: true });
-    fs.writeFileSync(path.join(PENDING_DIR, "update.zip"), buf);
-    fs.writeFileSync(path.join(PENDING_DIR, "pending.json"), JSON.stringify({ targetVersion: targetVersion || "", sha256: sha256 || "" }, null, 2), "utf8");
-    res.json({ ok: true, message: "更新包已下载，重启软件后将自动完成更新" });
+    const id = "upd-" + (updateJobSeq++);
+    const job = {
+      id,
+      status: "running",
+      progress: 0,
+      downloaded: 0,
+      total: null,
+      targetVersion: targetVersion || "",
+      error: null,
+      message: "开始下载…"
+    };
+    updateJobs.set(id, job);
+    res.json({ ok: true, jobId: id, message: "开始下载" });
+    (async () => {
+      try {
+        const r = await fetch(downloadUrl);
+        if (!r.ok) throw new Error(`下载更新包失败（HTTP ${r.status}）`);
+        const total = Number(r.headers.get("content-length")) || null;
+        job.total = total;
+        job.downloaded = 0;
+        const reader = r.body && r.body.getReader ? r.body.getReader() : null;
+        const chunks = [];
+        let bytes = 0;
+        if (reader) {
+          // 流式读取，实时更新进度
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value && value.length) {
+              chunks.push(value);
+              bytes += value.length;
+              job.downloaded = bytes;
+              job.progress = total ? Math.min(100, Math.round((bytes / total) * 1000) / 10) : null;
+            }
+          }
+        } else {
+          const ab = await r.arrayBuffer();
+          bytes = ab.byteLength;
+          chunks.push(Buffer.from(ab));
+          job.downloaded = bytes;
+          job.progress = total ? Math.min(100, Math.round((bytes / total) * 1000) / 10) : null;
+        }
+        const buf = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
+        if (sha256) {
+          const hash = crypto.createHash("sha256").update(buf).digest("hex");
+          if (hash !== sha256) throw new Error("更新包 sha256 校验失败，已停止");
+        }
+        fs.mkdirSync(PENDING_DIR, { recursive: true });
+        fs.writeFileSync(path.join(PENDING_DIR, "update.zip"), buf);
+        fs.writeFileSync(path.join(PENDING_DIR, "pending.json"), JSON.stringify({ targetVersion: targetVersion || "", sha256: sha256 || "" }, null, 2), "utf8");
+        job.status = "done";
+        job.progress = 100;
+        job.message = `更新包已下载完成（${(buf.length / 1048576).toFixed(1)}MB），重启软件后自动完成更新`;
+      } catch (err) {
+        job.status = "error";
+        job.error = err && err.message ? err.message : "下载更新失败";
+        job.message = job.error;
+      }
+    })();
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: error.message || "下载更新失败" });
   }
+});
+
+// 查询下载进度
+app.get("/api/update/jobs/:id", (req, res) => {
+  const job = updateJobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: "任务不存在" });
+  res.json(job);
+});
+
+// 更新完成后的“现在重启”信号：
+//   - Electron 版由 preload 的 window.dsh.relaunch() 直接让 electron-main 重启，无需本接口；
+//   - 独立 service(浏览器) 版：前端可调用本接口仅作记录/提示，重启需由用户关闭并重新打开。
+app.post("/api/update/restart", (req, res) => {
+  updateRestartRequested = true;
+  res.json({ ok: true, restart: true });
+});
+app.get("/api/update/restart-requested", (req, res) => {
+  res.json({ restart: updateRestartRequested });
 });
 
 app.get("/api/templates/:type", (req, res) => {
