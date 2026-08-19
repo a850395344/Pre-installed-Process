@@ -156,13 +156,9 @@
               <label><input type="radio" name="overTtPolicy" value="allow"> 可超节拍</label>
             </span>
           </label>
-          <label class="tt-field">
-            <span>单岗位最多人数（可超节拍时）</span>
-            <input type="number" id="maxPeoplePerStation" min="1" max="10" step="1" value="2">
-          </label>
           <div class="plan-note">
-            <strong>适用原则</strong>：<strong>禁止超节拍</strong>（默认）——每个岗位不超过节拍，超了自动增岗，适合单岗单人、严格按岗位节拍考核的场合；
-            <strong>可超节拍</strong>——允许单个岗位超过节拍（表示该岗位由多人合干、每人分摊后≤节拍），适合小线线束这类“工作量约为 x.x 个岗位、但实际安排多人”的工位；超节拍岗位会自动给出“建议 N 人合干（每人分摊≤TT）”。单岗位建议人数最多按“单岗位最多人数”计算。
+            <strong>适用原则</strong>：默认<strong>单岗单人</strong>。<strong>禁止超节拍</strong>（默认）——每个岗位不超过节拍、超了自动增岗，适合严格按岗位节拍考核的场合；
+            <strong>可超节拍</strong>——允许单个岗位的工时超过节拍（表示该岗位由多人合干、每人分摊后≤节拍），适合小线线束这类“工作量约为 x.x 个岗位、但实际安排多人”的工位；超节拍岗位会自动给出“建议 N 人合干（每人分摊≤TT）”。无需单独设置人数。
           </div>
 
           <label class="tt-field" id="fieldMaxSubFrames">

@@ -314,6 +314,8 @@ body {
 }
 .btn.big { padding: 12px 32px; font-size: 15px; }
 .btn:disabled { opacity: .4; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+.btn.danger { background: #dc2626; color: #fff; border-color: transparent; }
+.btn.danger:hover:not(:disabled) { background: #b91c1c; color: #fff; box-shadow: 0 8px 22px rgba(220, 38, 38, .24); }
 
 /* 状态 */
 .status {

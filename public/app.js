@@ -385,6 +385,38 @@ async function autoUpdatePrompt() {
   } catch {}
 }
 
+// 统一的确认弹窗（替代原生 confirm）：返回 Promise<boolean>
+function showConfirmModal(message, opts = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "upd-overlay";
+    const box = document.createElement("div");
+    box.className = "req-modal";
+    if (opts.title) {
+      const h = document.createElement("h3");
+      h.textContent = opts.title;
+      box.appendChild(h);
+    }
+    const p = document.createElement("p");
+    p.textContent = message;
+    p.style = "line-height:1.7; white-space:pre-wrap; color:var(--text-2); font-size:13px;";
+    box.appendChild(p);
+    const row = document.createElement("div");
+    row.style = "display:flex; gap:10px; justify-content:flex-end; margin-top:4px;";
+    const btnCancel = document.createElement("button");
+    btnCancel.className = "btn"; btnCancel.type = "button"; btnCancel.textContent = opts.cancelText || "取消";
+    btnCancel.onclick = () => { overlay.remove(); resolve(false); };
+    const btnOk = document.createElement("button");
+    btnOk.className = opts.danger ? "btn danger" : "btn primary"; btnOk.type = "button"; btnOk.textContent = opts.confirmText || "确定";
+    btnOk.onclick = () => { overlay.remove(); resolve(true); };
+    row.appendChild(btnCancel); row.appendChild(btnOk);
+    box.appendChild(row);
+    overlay.appendChild(box);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) { overlay.remove(); resolve(false); } });
+    document.body.appendChild(overlay);
+  });
+}
+
 // ==================== 本地生成历史 ====================
 function timeText(iso) {
   try {
@@ -442,7 +474,8 @@ function renderHistoryModal() {
     listWrap.innerHTML = rows;
     listWrap.querySelectorAll("[data-open]").forEach((btn) => btn.addEventListener("click", () => { openGenHistory(btn.dataset.open); overlay.remove(); }));
     listWrap.querySelectorAll("[data-del]").forEach((btn) => btn.addEventListener("click", async () => {
-      if (!confirm("确定删除该条生成历史吗？（本机原始项目文件不受影响）")) return;
+      const ok = await showConfirmModal("确定删除该条生成历史吗？（本机原始项目文件不受影响）", { title: "删除生成历史", confirmText: "删除", danger: true });
+      if (!ok) return;
       try { await fetch("/api/gen-history/" + btn.dataset.del, { method: "DELETE" }); renderHistoryModal(); } catch {}
     }));
   }).catch((err) => { listWrap.innerHTML = '<div class="validation-error">读取失败：' + escapeHtml(err.message || err) + '</div>'; });
@@ -537,7 +570,8 @@ async function deleteUploadedFile(field) {
   const card = fileCard(field);
   const label = card ? (card.dataset.label || field) : field;
   if (!files[field]) { toast(`「${label}」尚未上传，无需删除`, "error"); return; }
-  if (!confirm(`确定删除已上传的「${label}」吗？（不影响你本机原始文件，删除后需重新上传）`)) return;
+  const ok = await showConfirmModal(`确定删除已上传的「${label}」吗？（不影响你本机原始文件，删除后需重新上传）`, { title: "删除文件", confirmText: "删除", danger: true });
+  if (!ok) return;
   delete files[field];
   setFileBlank(field);
   try { await fetch("/api/stash/" + field, { method: "DELETE" }); } catch {}
@@ -549,7 +583,8 @@ async function clearAllUploadedFiles() {
   const fields = ["standard", "ebom", "mbom", "pdf"];
   const hasAny = fields.some((k) => !!files[k]);
   if (!hasAny) { toast("当前没有已上传的文件", "error"); return; }
-  if (!confirm("确定清空全部已上传的文件吗？（不影响你本机原始文件，清空后需重新上传）")) return;
+  const ok = await showConfirmModal("确定清空全部已上传的文件吗？（不影响你本机原始文件，清空后需重新上传）", { title: "清空已上传文件", confirmText: "清空", danger: true });
+  if (!ok) return;
   for (const k of fields) { delete files[k]; setFileBlank(k); }
   try { await fetch("/api/stash", { method: "DELETE" }); } catch {}
   resetAnalysisState();
@@ -597,7 +632,6 @@ function appendAnalysisOptions(fd) {
   fd.append("tt", $("#tt").value || "");
   fd.append("preassemblyMode", $("#preassemblyMode").value || "");
   fd.append("overTtPolicy", (document.querySelector('input[name="overTtPolicy"]:checked') || {}).value || "forbid");
-  fd.append("maxPeoplePerStation", $("#maxPeoplePerStation").value || "2");
   fd.append("loopSingleKit", $("#loopSingleKit").value || "");
   fd.append("loopKitTransferMiddle", $("#loopKitTransferMiddle").value || "");
   fd.append("loopKitTransferLast", $("#loopKitTransferLast").value || "");
@@ -829,8 +863,7 @@ function defineTabs() {
       ["不能在线SP/SC压接点", (plan.noOnlineUltrasonicSplices || []).join("、") || "无"],
       ["强制线下插接护套", (plan.forcedOfflineHousings || []).join("、") || "无"],
       ["组超节拍处理方式", plan.sameStationOverTtMode === "best-rate" ? "按最佳插接率拆分" : "强制同岗（默认）"],
-      ["超节拍处理", plan.overTtPolicy === "allow" ? "可超节拍（多人合干）" : "禁止超节拍（默认）"],
-      ["单岗位最多人数", plan.maxPeoplePerStation || "2"],
+      ["超节拍处理", plan.overTtPolicy === "allow" ? "可超节拍（多人合干，自动建议N人）" : "禁止超节拍（默认，单岗单人）"],
       ["打圈工时(秒/岗位)", `单KIT:${(plan.loopTimes && plan.loopTimes.singleKit) || 0}；KIT传递中间:${(plan.loopTimes && plan.loopTimes.kitTransferMiddle) || 0}；KIT传递末:${(plan.loopTimes && plan.loopTimes.kitTransferLast) || 0}；SUB末:${(plan.loopTimes && plan.loopTimes.subLast) || 0}`],
       ["标准工时已含打圈", plan.standardIncludesLoop ? "是（不重复计50秒）" : "否（按固定值计入）"],
       ["工时源完整", plan.missingTimeSource ? "否（存在【未找到工时源】动作，TT/岗位数为候选估算）" : "是"],
