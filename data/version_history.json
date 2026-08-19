@@ -1,6 +1,20 @@
 {
-  "version": "1.0.26",
+  "version": "1.0.27",
   "records": [
+    {
+      "version": "1.0.27",
+      "time": "2026-08-19T05:50:38.081Z",
+      "action": "发版·更新模块修复与完善",
+      "detail": "发版·更新模块修复与完善（1.0.27）：\n1. 修复核心更新Bug：此前打进 update.zip 的 package.json 仍是旧版本号，导致用户更新后代码是新版但版本号保持旧值、一直提示有更新形成死循环；现将版本号写入提前到“打包前”完成，并核验 zip 内 package.json 版本正确。\n2. 下载体验：更新下载改为任务式并实时回传进度（百分比、已下载/总大小），前端弹出进度条。\n3. 成功/失败反馈：下载完成并 sha256 校验通过后明确提示；校验失败/网络异常给出明确原因。\n4. 下载成功后弹出“是否现在重启”：Electron 窗口版通过新增 preload.js 暴露 relaunch，点击自动重启并应用更新（重启后版本显示新版、不再提示）；独立服务(浏览器)版提示需关闭重开。\n5. 新增 preload.js 及 /api/update/jobs/:id、/api/update/restart、/api/update/restart-requested 接口；preload.js 纳入发布清单。\n6. 重新发布修复版 update.zip/version.json 至 Gitee，并重打完整安装包与分卷发布。",
+      "modules": [
+        "更新模块修复(版本号打包顺序)",
+        "下载进度条",
+        "成功/失败反馈",
+        "现在重启(Electron relaunch)",
+        "preload.js与进度/重启接口",
+        "重打安装包与分卷发布"
+      ]
+    },
     {
       "version": "1.0.26",
       "time": "2026-08-19T05:15:09.140Z",
