@@ -198,6 +198,35 @@ const resetUpdateBusy = () => {
   if (updateBtnEl) { updateBtnEl.disabled = false; updateBtnEl = null; }
 };
 
+// 统一更新弹窗骨架：渐变头部徽标 + 卡片主体
+function createUpdateModal(title, icon) {
+  const overlay = document.createElement("div");
+  overlay.className = "upd-overlay";
+  const card = document.createElement("div");
+  card.className = "upd-modal";
+  const head = document.createElement("div");
+  head.className = "upd-head";
+  const ic = document.createElement("span"); ic.className = "upd-icon"; ic.textContent = icon || "🚀";
+  const tt = document.createElement("span"); tt.className = "upd-title"; tt.textContent = title;
+  head.appendChild(ic); head.appendChild(tt);
+  const body = document.createElement("div");
+  body.className = "upd-body";
+  card.appendChild(head); card.appendChild(body);
+  overlay.appendChild(card);
+  const close = () => overlay.remove();
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  document.body.appendChild(overlay);
+  return { overlay, card, head, ic, tt, body, close };
+}
+// 版本对比块
+function updVersionsHtml(cur, next) {
+  return `<div class="upd-vers">
+    <div class="upd-ver"><b>当前版本</b><span>${escapeHtml(cur)}</span></div>
+    <div class="upd-sep">→</div>
+    <div class="upd-ver next"><b>最新版本</b><span>${escapeHtml(next)}</span></div>
+  </div>`;
+}
+
 // 统一“下载→进度→成功→重启提示”流程
 async function beginUpdateDownload(d, closeOverlay) {
   let resp;
@@ -222,59 +251,53 @@ async function beginUpdateDownload(d, closeOverlay) {
   }
   if (closeOverlay) closeOverlay();
 
-  // 进度弹窗
-  const overlay = document.createElement("div");
-  overlay.className = "req-modal-overlay";
-  const box = document.createElement("div");
-  box.className = "req-modal";
-  const h = document.createElement("h3"); h.textContent = "正在下载更新包…";
-  const barWrap = document.createElement("div");
-  barWrap.style = "height:16px; background:#e5e7eb; border-radius:8px; overflow:hidden; margin-top:14px;";
-  const bar = document.createElement("div");
-  bar.style = "width:0%; height:100%; background:linear-gradient(90deg,#3b82f6,#10b981); transition:width .3s;";
-  barWrap.appendChild(bar);
-  const pct = document.createElement("div");
-  pct.style = "margin-top:8px; color:var(--text-2); font-size:12px;"; pct.textContent = "0%";
-  const info = document.createElement("div");
-  info.style = "margin-top:6px; color:var(--text-3); font-size:12px; line-height:1.6;";
-  info.textContent = "正在连接更新源…";
-  box.appendChild(h); box.appendChild(barWrap); box.appendChild(pct); box.appendChild(info);
-  overlay.appendChild(box);
-  const closeBox = () => overlay.remove();
-  overlay.addEventListener("click", (e) => { if (e.target === overlay) closeBox(); });
-  document.body.appendChild(overlay);
+  const m = createUpdateModal("正在下载更新包", "⬇️");
+  const body = m.body;
+  const track = document.createElement("div"); track.className = "upd-track";
+  const bar = document.createElement("div"); bar.className = "upd-bar";
+  track.appendChild(bar);
+  const meta = document.createElement("div"); meta.className = "upd-meta";
+  const info = document.createElement("span"); info.className = "upd-info-text"; info.textContent = "正在连接更新源…";
+  const pct = document.createElement("span"); pct.className = "upd-pct"; pct.textContent = "0%";
+  meta.appendChild(info); meta.appendChild(pct);
+  const prog = document.createElement("div"); prog.className = "upd-progress";
+  prog.appendChild(track); prog.appendChild(meta);
+  body.appendChild(prog);
 
   const finish = () => { resetUpdateBusy(); };
+  const setDone = () => { m.tt.textContent = "下载完成"; m.ic.textContent = "✅"; };
+
   const poll = async () => {
     try {
       const jresp = await fetch("/api/update/jobs/" + data.jobId);
       const j = await jresp.json();
       if (!j || j.status === "error") {
-        pct.textContent = "失败"; bar.style.width = "0%";
+        bar.style.width = "0%";
+        pct.textContent = "失败"; pct.style.color = "#dc2626";
+        m.ic.textContent = "⚠️"; m.tt.textContent = "下载失败";
         info.textContent = (j && j.error) || "下载失败";
-        const ok = document.createElement("button");
-        ok.className = "btn primary"; ok.type = "button"; ok.textContent = "关闭";
-        ok.onclick = () => { closeBox(); finish(); };
-        box.appendChild(ok);
+        const ok = document.createElement("button"); ok.className = "btn primary"; ok.type = "button"; ok.textContent = "关闭";
+        ok.onclick = () => { m.close(); finish(); };
+        const row = document.createElement("div"); row.className = "upd-actions"; row.appendChild(ok);
+        body.appendChild(row);
         return;
       }
       if (j.progress != null) { bar.style.width = j.progress + "%"; pct.textContent = Math.round(j.progress) + "%"; }
-      if (j.downloaded != null && j.total) info.textContent = `已下载 ${(j.downloaded / 1048576).toFixed(1)}MB / ${(j.total / 1048576).toFixed(1)}MB  · ${Math.round(j.progress || 0)}%`;
+      if (j.downloaded != null && j.total) info.textContent = `已下载 ${(j.downloaded / 1048576).toFixed(1)}MB / ${(j.total / 1048576).toFixed(1)}MB`;
       else if (j.downloaded != null) info.textContent = `已下载 ${(j.downloaded / 1048576).toFixed(1)}MB（等待校验…）`;
       if (j.status === "done") {
         bar.style.width = "100%"; pct.textContent = "100%";
-        info.textContent = "更新包已下载并校验完成（sha256 通过）✅";
-        const note = document.createElement("div");
-        note.style = "margin-top:10px; color:var(--text-3); font-size:12px; line-height:1.7;";
+        setDone();
+        const ok = document.createElement("div"); ok.className = "upd-success-msg"; ok.textContent = "更新包已下载并校验完成（sha256 通过）✅";
+        const note = document.createElement("div"); note.className = "upd-info-row";
         note.textContent = IS_ELECTRON
-          ? "点击“现在重启”将自动重启软件并应用更新（重启后版本将显示为新版，不再提示更新）。"
-          : "独立服务版：请关闭并重新打开软件以应用更新（仅刷新页面不会生效），重开后版本将显示为新版、不再提示更新。";
-        const row = document.createElement("div");
-        row.style = "margin-top:14px; display:flex; gap:10px;";
+          ? "点击“现在重启”将自动重启软件并应用更新，重启后版本显示为新版、不再提示更新。"
+          : "独立服务版：请关闭并重新打开软件以应用更新（仅刷新页面不会生效），重开后显示新版、不再提示更新。";
         const later = document.createElement("button"); later.className = "btn"; later.type = "button"; later.textContent = "稍后";
         const now = document.createElement("button"); now.className = "btn primary"; now.type = "button"; now.textContent = IS_ELECTRON ? "现在重启" : "我已重新打开";
+        const row = document.createElement("div"); row.className = "upd-actions";
         row.appendChild(later); row.appendChild(now);
-        later.onclick = () => { closeBox(); finish(); };
+        later.onclick = () => { m.close(); finish(); };
         now.onclick = () => {
           if (IS_ELECTRON && window.dsh.relaunch) {
             try { window.dsh.relaunch(); } catch (e3) { showMessageModal("更新", "重启失败：" + escapeHtml(e3 && e3.message ? e3.message : e3)); }
@@ -284,7 +307,7 @@ async function beginUpdateDownload(d, closeOverlay) {
             later.remove(); now.remove();
           }
         };
-        box.appendChild(note); box.appendChild(row);
+        body.appendChild(ok); body.appendChild(note); body.appendChild(row);
         finish();
         return;
       }
@@ -308,21 +331,34 @@ async function checkUpdate() {
     const d = await resp.json();
     if (!d.configured) {
       resetUpdateBusy();
-      showMessageModal("检查更新", `<div>${escapeHtml(d.message)}</div><div style="margin-top:6px">更新源地址形如：<code>https://gitee.com/你的用户名/仓库/raw/master/version.json</code></div>`);
+      const m = createUpdateModal("检查更新", "🔍");
+      const info = document.createElement("div"); info.className = "upd-info-row";
+      info.innerHTML = escapeHtml(d.message) + `<div style="margin-top:8px">更新源地址形如：<code>https://gitee.com/你的用户名/仓库/raw/master/version.json</code></div>`;
+      const b = document.createElement("button"); b.className = "btn primary"; b.type = "button"; b.textContent = "关闭"; b.onclick = () => m.close();
+      const row = document.createElement("div"); row.className = "upd-actions"; row.appendChild(b);
+      m.body.appendChild(info); m.body.appendChild(row);
       return;
     }
     if (!d.hasUpdate) {
       resetUpdateBusy();
-      showMessageModal("检查更新", `<div>当前已是新版本 <strong>${escapeHtml(d.current)}</strong>${d.latest ? `（更新源最新 ${escapeHtml(d.latest)}）` : ""}</div>`);
+      const m = createUpdateModal("检查更新", "✅");
+      const v = document.createElement("div"); v.className = "upd-vers";
+      v.innerHTML = `<div class="upd-ver"><b>当前版本</b><span>${escapeHtml(d.current)}</span></div>`;
+      const info = document.createElement("div"); info.className = "upd-info-row"; info.textContent = "当前已是最新版本，无需更新。";
+      const b = document.createElement("button"); b.className = "btn primary"; b.type = "button"; b.textContent = "关闭"; b.onclick = () => m.close();
+      const row = document.createElement("div"); row.className = "upd-actions"; row.appendChild(b);
+      m.body.appendChild(v); m.body.appendChild(info); m.body.appendChild(row);
       return;
     }
-    let html = `<div>当前版本 <strong>${escapeHtml(d.current)}</strong> → 发现新版本 <strong>${escapeHtml(d.latest)}</strong></div>`;
-    if (d.notes) html += `<div style="margin-top:6px">更新说明：${escapeHtml(d.notes)}</div>`;
-    html += `<div style="margin-top:12px"><button class="btn primary" type="button" id="doUpdateBtn">立即下载并更新</button>`;
-    if (d.downloadUrl) html += ` <a class="btn" href="${escapeHtml(d.downloadUrl)}" target="_blank" rel="noopener">去下载页</a>`;
-    html += `</div>`;
-    const ov = showMessageModal("检查更新", html);
-    document.getElementById("doUpdateBtn").addEventListener("click", () => { ov.remove(); beginUpdateDownload(d); });
+    const m = createUpdateModal("发现新版本", "🚀");
+    const v = document.createElement("div"); v.innerHTML = updVersionsHtml(d.current, d.latest);
+    m.body.appendChild(v);
+    if (d.notes) { const n = document.createElement("div"); n.className = "upd-notes"; n.textContent = d.notes; m.body.appendChild(n); }
+    const row = document.createElement("div"); row.className = "upd-actions";
+    if (d.downloadUrl) { const a = document.createElement("a"); a.className = "btn"; a.href = d.downloadUrl; a.target = "_blank"; a.rel = "noopener"; a.textContent = "去下载页"; row.appendChild(a); }
+    const dl = document.createElement("button"); dl.className = "btn primary"; dl.type = "button"; dl.textContent = "立即下载并更新"; dl.onclick = () => { m.close(); beginUpdateDownload(d); };
+    row.appendChild(dl);
+    m.body.appendChild(row);
   } catch (e) {
     resetUpdateBusy();
     showMessageModal("检查更新", "检查更新失败：" + escapeHtml(e && e.message ? e.message : e));
@@ -337,28 +373,15 @@ async function autoUpdatePrompt() {
     const resp = await fetch("/api/update/check");
     const d = await resp.json();
     if (!d || !d.hasUpdate || !d.configured) return;
-    const overlay = document.createElement("div");
-    overlay.className = "req-modal-overlay";
-    const box = document.createElement("div");
-    box.className = "req-modal";
-    const h = document.createElement("h3"); h.textContent = "发现新版本 " + escapeHtml(d.latest);
-    const b = document.createElement("div");
-    b.style = "line-height:1.7; color:var(--text-2); font-size:13px;";
-    b.innerHTML = `当前版本 <strong>${escapeHtml(d.current)}</strong> → 最新版本 <strong>${escapeHtml(d.latest)}</strong>`;
-    if (d.notes) b.innerHTML += `<div style="margin-top:6px">更新说明：${escapeHtml(d.notes)}</div>`;
-    const row = document.createElement("div");
-    row.style = "margin-top:14px; display:flex; gap:10px;";
-    const btnLater = document.createElement("button"); btnLater.className = "btn"; btnLater.type = "button"; btnLater.textContent = "稍后";
-    const btnNow = document.createElement("button"); btnNow.className = "btn primary"; btnNow.type = "button"; btnNow.textContent = "现在更新";
-    row.appendChild(btnLater); row.appendChild(btnNow);
-    b.appendChild(row);
-    box.appendChild(h); box.appendChild(b);
-    overlay.appendChild(box);
-    const close = () => overlay.remove();
-    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
-    btnLater.addEventListener("click", close);
-    btnNow.addEventListener("click", () => beginUpdateDownload(d, close));
-    document.body.appendChild(overlay);
+    const m = createUpdateModal("发现新版本 " + escapeHtml(d.latest), "🚀");
+    const v = document.createElement("div"); v.innerHTML = updVersionsHtml(d.current, d.latest);
+    m.body.appendChild(v);
+    if (d.notes) { const n = document.createElement("div"); n.className = "upd-notes"; n.textContent = d.notes; m.body.appendChild(n); }
+    const row = document.createElement("div"); row.className = "upd-actions";
+    const later = document.createElement("button"); later.className = "btn"; later.type = "button"; later.textContent = "稍后"; later.onclick = () => m.close();
+    const now = document.createElement("button"); now.className = "btn primary"; now.type = "button"; now.textContent = "现在更新"; now.onclick = () => beginUpdateDownload(d, m.close);
+    row.appendChild(later); row.appendChild(now);
+    m.body.appendChild(row);
   } catch {}
 }
 
