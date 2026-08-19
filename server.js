@@ -11,6 +11,114 @@ const { analyzeProject, analyzeFilesForPreview, buildWorkbook, buildProcessWorkb
 const { buildTemplate } = require("./src/templates");
 const { getVersionHistory, addRecord, verifyBackendPassword, buildBackendData } = require("./src/version");
 
+// ==================== 单实例（窗口版 + 浏览器版共用） ====================
+// 用 data/instance.lock 记录PID；已有存活实例时拒绝启动第二个服务。
+const INSTANCE_LOCK = path.join(__dirname, "data", "instance.lock");
+function acquireSingleInstanceLock() {
+  try {
+    const old = String(fs.readFileSync(INSTANCE_LOCK, "utf8") || "").trim();
+    if (old) {
+      const pid = Number(old);
+      if (pid && pid !== process.pid) {
+        try {
+          process.kill(pid, 0);
+          return false; // 已有存活实例
+        } catch {
+          // 旧锁进程已不存在（陈旧锁），继续占用
+        }
+      }
+    }
+  } catch {}
+  try {
+    fs.mkdirSync(path.dirname(INSTANCE_LOCK), { recursive: true });
+    fs.writeFileSync(INSTANCE_LOCK, String(process.pid), "utf8");
+  } catch {}
+  process.on("exit", () => { try { fs.unlinkSync(INSTANCE_LOCK); } catch {} });
+  return true;
+}
+if (!acquireSingleInstanceLock()) {
+  console.error("[单实例] 预装工艺生成器已在运行，请关闭已有窗口/服务或直接使用其页面。本实例退出。");
+  process.exit(1);
+}
+
+// ==================== 本地生成历史（data/gen_history，与版本记录分开） ====================
+const GEN_HISTORY_DIR = path.join(__dirname, "data", "gen_history");
+const GEN_HISTORY_MAX_ENTRIES = 30;
+const GEN_HISTORY_MAX_TOTAL_MB = 300;
+function genHistoryIndexFile() {
+  return path.join(GEN_HISTORY_DIR, "index.json");
+}
+function readGenHistoryIndex() {
+  try { return JSON.parse(fs.readFileSync(genHistoryIndexFile(), "utf8")); } catch { return []; }
+}
+function writeGenHistoryIndex(list) {
+  fs.mkdirSync(GEN_HISTORY_DIR, { recursive: true });
+  fs.writeFileSync(genHistoryIndexFile(), JSON.stringify(list, null, 2), "utf8");
+}
+// 计算目录总大小（MB）
+function dirSizeMB(dir) {
+  let total = 0;
+  try {
+    const walk = (d) => {
+      for (const ent of fs.readdirSync(d, { withFileTypes: true })) {
+        const full = path.join(d, ent.name);
+        if (ent.isDirectory()) walk(full);
+        else if (ent.isFile()) total += fs.statSync(full).size;
+      }
+    };
+    walk(dir);
+  } catch {}
+  return total / (1024 * 1024);
+}
+// 生成完成后：备份上传文件 + 结果JSON，写入索引（时间倒序，最新在前）
+function saveGenHistory(files, result, regions, modeLabel) {
+  try {
+    const id = new Date().toISOString().replace(/[:.]/g, "-");
+    const dir = path.join(GEN_HISTORY_DIR, id);
+    fs.mkdirSync(dir, { recursive: true });
+    const fileNames = {};
+    for (const key of ["standard", "ebom", "mbom", "pdf"]) {
+      const f = files[key];
+      if (!f || !f.buffer) continue;
+      fs.writeFileSync(path.join(dir, key), f.buffer);
+      fileNames[key] = f.originalname || key;
+    }
+    fs.writeFileSync(path.join(dir, "result.json"), JSON.stringify(result), "utf8");
+    const entry = {
+      id,
+      time: new Date().toISOString(),
+      regions: (regions || []).join("、") || "未选择",
+      modeLabel: modeLabel || "未选择",
+      stations: (result.plan && result.plan.stationDetails && result.plan.stationDetails.length) || 0,
+      wires: (result.summary && result.summary.wires) || 0,
+      packages: (result.summary && result.summary.packages) || 0,
+      issues: (result.summary && result.summary.issues) || 0,
+      tt: result.options && result.options.tt != null ? result.options.tt : "",
+      missingTimeSource: !!(result.plan && result.plan.missingTimeSource),
+      fileNames
+    };
+    const list = [entry, ...readGenHistoryIndex()].slice(0, GEN_HISTORY_MAX_ENTRIES);
+    // 超容量时删除最旧条目
+    while (dirSizeMB(GEN_HISTORY_DIR) > GEN_HISTORY_MAX_TOTAL_MB && list.length > 1) {
+      const last = list.pop();
+      try { fs.rmSync(path.join(GEN_HISTORY_DIR, last.id), { recursive: true, force: true }); } catch {}
+    }
+    writeGenHistoryIndex(list);
+    return entry;
+  } catch (e) {
+    console.error("保存生成历史失败:", e.message);
+    return null;
+  }
+}
+function deleteGenHistory(id) {
+  const list = readGenHistoryIndex();
+  const next = list.filter((e) => e.id !== id);
+  if (next.length === list.length) return false;
+  try { fs.rmSync(path.join(GEN_HISTORY_DIR, id), { recursive: true, force: true }); } catch {}
+  writeGenHistoryIndex(next);
+  return true;
+}
+
 function parseList(value) {
   if (!value) return [];
   if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean);
@@ -254,7 +362,19 @@ app.post("/api/analyze-files", upload.fields([
     }
     if (files.pdf) saveTempPdf(files.pdf.buffer);
     const tt = req.body.tt ? Number(req.body.tt) : null;
-    const analysis = await analyzeFilesForPreview(files, { tt });
+    const analysis = await analyzeFilesForPreview(files, {
+      tt,
+      preassemblyMode: req.body.preassemblyMode || "",
+      loopTimes: {
+        singleKit: req.body.loopSingleKit ? Number(req.body.loopSingleKit) : 0,
+        kitTransferMiddle: req.body.loopKitTransferMiddle ? Number(req.body.loopKitTransferMiddle) : 0,
+        kitTransferLast: req.body.loopKitTransferLast ? Number(req.body.loopKitTransferLast) : 0,
+        subLast: req.body.loopSubLast ? Number(req.body.loopSubLast) : 0
+      },
+      overTtPolicy: req.body.overTtPolicy === "allow" ? "allow" : "forbid",
+      maxPeoplePerStation: req.body.maxPeoplePerStation ? Number(req.body.maxPeoplePerStation) : 2,
+      standardIncludesLoop: req.body.standardIncludesLoop === "true" || req.body.standardIncludesLoop === "yes"
+    });
     res.json(analysis);
   } catch (error) {
     console.error(error);
@@ -285,12 +405,24 @@ app.post("/api/analyze", upload.fields([
     const maxStations = req.body.maxStations ? Number(req.body.maxStations) : null;
     const autoStations = req.body.autoStations === "true" || req.body.autoStations === "yes" || req.body.autoStations === "1";
     const maxSubFrames = req.body.maxSubFrames ? Number(req.body.maxSubFrames) : null;
-    const loopTimes = {
-      singleKit: req.body.loopSingleKit ? Number(req.body.loopSingleKit) : null,
-      kitTransferMiddle: req.body.loopKitTransferMiddle ? Number(req.body.loopKitTransferMiddle) : null,
-      kitTransferLast: req.body.loopKitTransferLast ? Number(req.body.loopKitTransferLast) : null,
-      subLast: req.body.loopSubLast ? Number(req.body.loopSubLast) : null
+    // V2.6.1 参考打圈工时：50秒/件/岗位（按岗位计，与岗内人数无关）。非强制——未填写一律按0秒，
+    // 只有现场确实对半成品打圈时才填写；若勾选“标准工时已含打圈”则在生成侧统一置0查重（见 analyzeProject）。
+    const standardIncludesLoop = req.body.standardIncludesLoop === "true" || req.body.standardIncludesLoop === "yes";
+    const loopDef = (v) => {
+      const n = req.body[v];
+      if (n === "" || n == null) return 0;
+      return Number(n);
     };
+    const loopTimes = {
+      singleKit: loopDef("loopSingleKit"),
+      kitTransferMiddle: loopDef("loopKitTransferMiddle"),
+      kitTransferLast: loopDef("loopKitTransferLast"),
+      subLast: loopDef("loopSubLast")
+    };
+    // 硬阻断：TT 与 最多岗位数 至少提供一项，否则不给静默0岗位结果
+    if ((!tt || tt <= 0) && (!maxStations || maxStations <= 0)) {
+      return res.status(400).json({ error: "必须填写目标节拍 TT（秒/件）或最多预装岗位数（至少一项），否则无法形成岗位。" });
+    }
     const preassemblyMode = req.body.preassemblyMode || "";
     const onlineUltrasonic = req.body.onlineUltrasonic === "yes" || req.body.onlineUltrasonic === "true" || req.body.onlineUltrasonic === "是";
     const onlineUltrasonicMaxGroupsPerConfig = req.body.onlineUltrasonicMaxGroupsPerConfig ? Number(req.body.onlineUltrasonicMaxGroupsPerConfig) : null;
@@ -299,6 +431,8 @@ app.post("/api/analyze", upload.fields([
     const forcedOfflineHousings = parseList(req.body.forcedOfflineHousings);
     const sameStationHousings = parseList(req.body.sameStationHousings);
     const sameStationOverTtMode = req.body.sameStationOverTtMode === "best-rate" ? "best-rate" : "force-same";
+    const overTtPolicy = req.body.overTtPolicy === "allow" ? "allow" : "forbid";
+    const maxPeoplePerStation = req.body.maxPeoplePerStation ? Number(req.body.maxPeoplePerStation) : 2;
     let sameStationGroups = [];
     try { sameStationGroups = JSON.parse(req.body.sameStationGroups || "[]"); } catch {}
     let grommetStations = [];
@@ -313,6 +447,7 @@ app.post("/api/analyze", upload.fields([
       autoStations,
       maxSubFrames,
       loopTimes,
+      standardIncludesLoop,
       preassemblyMode,
       regions,
       onlineUltrasonic,
@@ -323,13 +458,12 @@ app.post("/api/analyze", upload.fields([
       sameStationHousings,
       sameStationGroups,
       sameStationOverTtMode,
+      overTtPolicy,
+      maxPeoplePerStation,
       grommetStations
     });
-    addRecord({
-      action: "生成工艺文件",
-      detail: `部位：${regions.join("、") || "未选"}；预装模式：${preassemblyMode || "未选"}；岗位数：${result.plan && result.plan.maxStations || "自动"}；在线超声波：${onlineUltrasonic ? "是" : "否"}`,
-      bump: false
-    });
+    // 本地生成不写入版本历史（版本记录只记录作者发布）；仅保存到本地生成历史。
+    saveGenHistory(files, result, regions, (result.plan && result.plan.modeLabel) || "");
     res.json(result);
   } catch (error) {
     console.error(error);
@@ -662,6 +796,52 @@ app.get("/api/templates/:type", (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: error.message || "模板生成失败" });
+  }
+});
+
+// ==================== 本地生成历史 ====================
+app.get("/api/gen-history", (req, res) => {
+  try {
+    res.json({ entries: readGenHistoryIndex() });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "读取生成历史失败" });
+  }
+});
+
+app.get("/api/gen-history/:id", (req, res) => {
+  try {
+    const id = req.params.id;
+    const entry = readGenHistoryIndex().find((e) => e.id === id);
+    if (!entry) return res.status(404).json({ error: "该记录不存在" });
+    const result = JSON.parse(fs.readFileSync(path.join(GEN_HISTORY_DIR, id, "result.json"), "utf8"));
+    res.json({ meta: entry, result });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "打开生成历史失败" });
+  }
+});
+
+app.get("/api/gen-history/:id/files/:field", (req, res) => {
+  try {
+    const id = req.params.id;
+    const field = req.params.field;
+    if (!["standard", "ebom", "mbom", "pdf"].includes(field)) return res.status(400).json({ error: "未知字段" });
+    const entry = readGenHistoryIndex().find((e) => e.id === id);
+    const p = path.join(GEN_HISTORY_DIR, id, field);
+    if (!fs.existsSync(p)) return res.status(404).json({ error: "无该文件（或未上传）" });
+    const name = (entry && entry.fileNames && entry.fileNames[field]) || field;
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Disposition", `attachment; filename="history_${field}"; filename*=UTF-8''${encodeURIComponent(name)}`);
+    res.send(fs.readFileSync(p));
+  } catch (error) {
+    res.status(500).json({ error: error.message || "下载失败" });
+  }
+});
+
+app.delete("/api/gen-history/:id", (req, res) => {
+  try {
+    res.json({ ok: deleteGenHistory(req.params.id) });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "删除失败" });
   }
 });
 

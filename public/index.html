@@ -19,6 +19,7 @@
       <a class="btn" href="ai.html">AI多模态</a>
       <a class="btn" href="version.html">版本记录</a>
       <a class="btn" href="backend.html">后台数据</a>
+      <button id="genHistoryBtn" class="btn" type="button">生成历史</button>
       <button id="checkUpdateBtn" class="btn" type="button">检查更新</button>
       <button id="exportBtn" class="btn" disabled>导出结构化数据包</button>
       <button id="exportProcessBtn" class="btn primary" disabled>导出预装工艺岗位表</button>
@@ -146,30 +147,56 @@
             <input type="number" id="onlineUltrasonicMaxTotalGroups" min="1" step="1" placeholder="例如 80" disabled>
           </label>
 
+          <label class="tt-field">
+            <span>超节拍处理</span>
+            <span class="radio-inline">
+              <label><input type="radio" name="overTtPolicy" value="forbid" checked> 禁止超节拍（默认）</label>
+              <label><input type="radio" name="overTtPolicy" value="allow"> 可超节拍</label>
+            </span>
+          </label>
+          <label class="tt-field">
+            <span>单岗位最多人数（可超节拍时）</span>
+            <input type="number" id="maxPeoplePerStation" min="1" max="10" step="1" value="2">
+          </label>
+          <div class="plan-note">
+            <strong>适用原则</strong>：<strong>禁止超节拍</strong>（默认）——每个岗位不超过节拍，超了自动增岗，适合单岗单人、严格按岗位节拍考核的场合；
+            <strong>可超节拍</strong>——允许单个岗位超过节拍（表示该岗位由多人合干、每人分摊后≤节拍），适合小线线束这类“工作量约为 x.x 个岗位、但实际安排多人”的工位；超节拍岗位会自动给出“建议 N 人合干（每人分摊≤TT）”。单岗位建议人数最多按“单岗位最多人数”计算。
+          </div>
+
           <label class="tt-field" id="fieldMaxSubFrames">
             <span>每个SUB组最多几个预装</span>
             <input type="number" id="maxSubFrames" min="1" step="1" placeholder="例如 8">
           </label>
 
           <label class="tt-field" id="fieldLoopSingleKit">
-            <span>单KIT打圈工时（秒）</span>
-            <input type="number" id="loopSingleKit" min="0" step="1" placeholder="例如 50">
+            <span>单KIT打圈工时（秒）<span style="font-weight:400;color:var(--text-3);font-size:12px">（参考50秒/件/岗位；按岗位计、与岗内人数无关；不填=0不计）</span></span>
+            <input type="number" id="loopSingleKit" min="0" step="1" placeholder="不填为0 / 需要时填50">
           </label>
 
           <label class="tt-field" id="fieldLoopKitTransferMiddle">
-            <span>KIT传递岗中间岗位打圈工时（秒）</span>
-            <input type="number" id="loopKitTransferMiddle" min="0" step="1" placeholder="例如 40">
+            <span>KIT传递岗中间岗位打圈工时（秒）<span style="font-weight:400;color:var(--text-3);font-size:12px">（每个输出半成品岗位各计一次；不填=0）</span></span>
+            <input type="number" id="loopKitTransferMiddle" min="0" step="1" placeholder="不填为0 / 需要时填50">
           </label>
 
           <label class="tt-field" id="fieldLoopKitTransferLast">
-            <span>KIT传递岗最后岗位打圈工时（秒）</span>
-            <input type="number" id="loopKitTransferLast" min="0" step="1" placeholder="例如 60">
+            <span>KIT传递岗最后岗位打圈工时（秒）<span style="font-weight:400;color:var(--text-3);font-size:12px">（不填=0）</span></span>
+            <input type="number" id="loopKitTransferLast" min="0" step="1" placeholder="不填为0 / 需要时填50">
           </label>
 
           <label class="tt-field" id="fieldLoopSubLast">
-            <span>SUB最后岗位打圈工时（秒）</span>
-            <input type="number" id="loopSubLast" min="0" step="1" placeholder="例如 55">
+            <span>SUB最后岗位打圈工时（秒）<span style="font-weight:400;color:var(--text-3);font-size:12px">（SUB路线只末位计一次；不填=0）</span></span>
+            <input type="number" id="loopSubLast" min="0" step="1" placeholder="不填为0 / 需要时填50">
           </label>
+
+          <label class="tt-field">
+            <span>标准工时已含打圈动作<span style="font-weight:400;color:var(--text-3);font-size:12px">（如标准工时表已含同一打圈动作，勾选后打圈统一按0计，避免重复累计）</span></span>
+            <span class="radio-inline">
+              <label><input type="checkbox" id="loopIncludeCheck" value="yes"> 已含打圈（打圈置0，不重复计）</label>
+            </span>
+          </label>
+          <div class="plan-note">
+            <strong>打圈工时说明（V2.6.1）</strong>：打圈 50 秒/件/岗位 为<strong>参考值，非强制</strong>——只有现场确实对输出半成品打圈时才填写，未填写一律按 0 秒，不计入岗位工时与 TT。<strong>打圈工时按岗位计、与一岗多人无关</strong>：一个岗位无论安排几人，打圈只计一次，多人合干只是分摊该岗位总工时；多人容量按「TT×人数−打圈预留」计算，打圈预留每岗位只扣一次。若正式标准工时表已包含同一完整打圈动作，勾选上方“已含打圈”以免重复累计。
+          </div>
         </div>
       </div>
 

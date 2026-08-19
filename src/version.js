@@ -72,14 +72,15 @@ function buildBackendData(extra = {}) {
   walk(root, "");
   const continuationGuide = [
     "1. 将本后台数据（含“功能一览”“核心文件说明”“续作约定”）完整复制给新AI。",
-    "2. 把 D:\\分工艺软件\\harness-process-app 整个目录加入新聊天窗口的工作目录。",
+    "2. 源码目录 = D:\\分工艺软件\\preassembly-src（原 harness-process-app 已改名）。续作时把该目录加入新聊天窗口的工作目录。",
     "3. 软件定位 = 根据客户上传的项目资料（标准工时/EBOM/MBOM/工艺PDF）生成四轮汽车线束后段预装工艺。",
     "4. 【最重要约定】所有数据（配置号、护套、导线、工时、岗位数）只来自客户在页面“放入项目资料”上传的文件；绝不读取/参考工作目录里任何项目资料文件（那些可能被移走或属于其他项目）。",
-    "5. 正式工时只来自标准工时文件；用户明确提供的固定工时（如KIT打圈50秒/件）除外；禁止经验式虚构工时。",
-    "6. 继续修改请按 data/version_history.json 的版本记录演进，不得回退已有功能；改动后必须 node --check 校验 JS，并确保 server.js、src/*、public/* 三者一致。",
-    "7. dist\\预装工艺生成器-win32-x64\\resources\\app 与 dist\\预装工艺生成器-Dream.zip 是分发/打包副本；改完源码如需更新，先关闭正在运行的软件再打包（运行时会占用文件导致压缩失败）。",
-    "8. 优先阅读与维护：README.md、server.js、src/generator.js（核心）、src/parse.js、src/validation.js、src/templates.js、src/version.js、public/index.html、public/app.js、public/ai.html、public/backend.html、public/version.html。",
-    "9. 【维护纪律】每次功能更新后，务必重新检查并同步本后台数据的“功能一览/续作说明/核心文件说明”与 README.md，确保接续信息反映最新状态，便于新AI无损续作（勿让接续信息过期）。"
+    "5. 正式工时只来自标准工时文件；用户明确提供的固定工时（如KIT打圈50秒/件）除外；禁止经验式虚构工时；未匹配到正式工时的动作标记【未找到工时源】，不注入默认值参与TT/岗位判定。",
+    "6. 版本策略：日常修复/新增功能【不】升版本号（当前为 1.0.25）；只有作者明确说“发版”时才用 publish-update.js 升高版本号并上传 version.json/update.zip 到 Gitee。本地“开始解析生成”不写入 version_history.json（只记录作者发版），生成结果只保存到 data/gen_history。",
+    "7. 继续修改请保持 server.js、src/*、public/* 三者一致；改动后必须 node --check 校验 JS；windows+browser 均为单实例，改单实例逻辑时注意 data/instance.lock 与 electron requestSingleInstanceLock。",
+    "8. dist\\预装工艺生成器-win32-x64\\resources\\app 与 dist\\预装工艺生成器-Dream.zip 是分发/打包副本；改完源码如需更新，先关闭正在运行的软件再打包（运行时会占用文件导致压缩失败）。",
+    "9. 优先阅读与维护：README.md、server.js、src/generator.js（核心）、src/parse.js、src/validation.js、src/templates.js、src/version.js、public/index.html、public/app.js、public/ai.html、public/backend.html、public/version.html。",
+    "10. 【维护纪律】每次功能更新后，务必重新检查并同步本后台数据的“功能一览/续作说明/核心文件说明”与 README.md，确保接续信息反映最新状态，便于新AI无损续作（勿让接续信息过期）。"
   ];
   const featureSummary = [
     "总体：本地 Node+浏览器（可 Electron 窗口）的线束后段预装工艺生成器；读取客户上传的标准工时/EBOM/MBOM/工艺PDF，按 V2.6.1 预装规则输出：结构化工艺数据包、预装工艺岗位表、人工核查表。",

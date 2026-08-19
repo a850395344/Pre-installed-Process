@@ -22,6 +22,18 @@ const url = `http://127.0.0.1:${port}`;
 let serverProcess = null;
 let mainWindow = null;
 
+// ==================== 单实例（窗口版）：只允许一个主窗口 ====================
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+}
+app.on("second-instance", () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
+
 function isServerUp() {
   return new Promise((resolve) => {
     const req = http.get(url, (res) => {
@@ -80,6 +92,7 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  if (!gotLock) return;
   if (!(await isServerUp())) {
     await startServer();
   }

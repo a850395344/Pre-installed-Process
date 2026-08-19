@@ -84,6 +84,40 @@ function pkgWeight(p) {
   return (p && p.estimatedSeconds) || 0;
 }
 
+// 打圈预留（秒/岗位）：按岗位类型分别返回打圈预留，用于“岗位数计算 + 装桶容量”。
+//   kit：KIT岗位/纯KIT/传递岗——每个实际启用且有半成品输出的岗位都会附加一次打圈（规则固定50秒/件/岗位）
+//   sub：SUB路线只在最后一个实际启用且有半成品输出的SUB岗位附加一次打圈
+// 预留只扣一次（与人数无关）：禁止超节拍时容量=TT-预留；允许超节拍时容量=TT×人数-预留。
+function loopReserves(loopTimes, mode) {
+  const n = (k) => Number(loopTimes && loopTimes[k]) || 0;
+  const s = n("singleKit");
+  const sub = n("subLast");
+  switch (mode) {
+    case "pure-kit": return { kit: s, sub: 0 };
+    case "kit-transfer-kit": return { kit: s, sub: 0 }; // 传递中间岗与末岗均输出半成品，都计打圈
+    case "pure-sub": return { kit: 0, sub };
+    case "sub-kit": return { kit: s, sub };
+    case "sub-kit-transfer": return { kit: s, sub };
+    default: return { kit: s, sub: 0 };
+  }
+}
+
+// 岗位级“按配置工时”：同一岗位内对每个配置分别求和（单件产品只生产一个配置，
+// 不叠加各配置工时）；max = 各配置合计的最大值，用于岗位总工时/TT判定。
+function stationConfigSeconds(pkgIds, packageMap, configs) {
+  const byCfg = {};
+  for (const pid of pkgIds || []) {
+    const p = packageMap.get(pid);
+    if (!p) continue;
+    for (const cfg of configs || []) {
+      const v = p.configTime && p.configTime[cfg];
+      if (v != null && v > 0) byCfg[cfg] = (byCfg[cfg] || 0) + v;
+    }
+  }
+  const vals = Object.values(byCfg).filter((v) => v > 0);
+  return { byCfg, max: vals.length ? Math.max(...vals) : 0 };
+}
+
 function normalizeTerminal(value) {
   const s = clean(value);
   return s === "-" ? "" : s;
@@ -293,19 +327,22 @@ function getPlugEndText(wire, forcedOfflineHousings = []) {
 }
 
 function getPlugTime(entries, wire, sealPresent, special) {
-  const base = sealPresent
-    ? (findStandardEntry(entries, ["Pluging", "sealed terminals to unsealed connector"]) || {}).time || 4.0
-    : (findStandardEntry(entries, ["Pluging", "Unsealed terminals to unsealed connector"]) || {}).time || 2.5;
-  const twistComp = special
-    ? (findStandardEntry(entries, ["Pluging", "shielded / Twisted pluging compensation"]) || {}).time || 1.6
-    : 0;
+  const sealedEntry = findStandardEntry(entries, ["Pluging", "sealed terminals to unsealed connector"]);
+  const unsealedEntry = findStandardEntry(entries, ["Pluging", "Unsealed terminals to unsealed connector"]);
+  const base = sealPresent ? (sealedEntry ? Number(sealedEntry.time) || 0 : 0) : (unsealedEntry ? Number(unsealedEntry.time) || 0 : 0);
+  const twistEntry = findStandardEntry(entries, ["Pluging", "shielded / Twisted pluging compensation"]);
+  const twistComp = special ? (twistEntry ? Number(twistEntry.time) || 0 : 0) : 0;
+  const missing = sealPresent ? !sealedEntry : !unsealedEntry;
   return {
     baseTime: base,
     twistComp,
     total: round(base + twistComp),
-    ref: sealPresent
-      ? "标准工时：带密封端子插接/未密封塑件（默认，待确认）"
-      : "标准工时：不带密封端子插接/不带密封塑件（默认，待确认）"
+    missing,
+    ref: missing
+      ? `【未找到工时源】标准工时表无对应插接动作（${sealPresent ? "带密封端子插接/未密封塑件" : "不带密封端子插接/不带密封塑件"}），未计入正式工时，须补充正式工时分摊后复核TT`
+      : (sealPresent
+        ? "标准工时：带密封端子插接/未密封塑件"
+        : "标准工时：不带密封端子插接/不带密封塑件")
   };
 }
 
@@ -364,7 +401,11 @@ function buildWireRows(wires) {
   }));
 }
 
-function buildHousingMatrix(wires) {
+function buildHousingMatrix(wires, packages) {
+  const pkgByW1 = new Map();
+  for (const p of packages || []) {
+    for (const w of p.wires || []) pkgByW1.set(w.w1 || w.drawingId, p.id);
+  }
   const map = new Map();
   for (const w of wires) {
     const h1 = clean(w.housing1);
@@ -375,22 +416,49 @@ function buildHousingMatrix(wires) {
     const b = h1 <= h2 ? h2 : h1;
     const key = a + "|" + b;
     if (!map.has(key)) {
-      map.set(key, { housingA: a, housingB: b, count: 0, wires: [], configs: new Set() });
+      map.set(key, { housingA: a, housingB: b, wires: new Set(), cfgCount: new Map() });
     }
     const row = map.get(key);
-    row.count += 1;
-    row.wires.push(w.w1 || w.drawingId);
-    for (const c of w.configCodes) row.configs.add(c);
+    row.wires.add(w.w1 || w.drawingId);
+    for (const c of w.configCodes) row.cfgCount.set(c, (row.cfgCount.get(c) || 0) + 1);
   }
-  return [...map.values()]
-    .map((row) => ({
+  // 每个护套与其伙伴的关联计数（用于最强/次强关联判定）
+  const partnerCount = new Map(); // h -> Map<other, count>
+  const rows = [...map.values()].map((row) => {
+    const count = row.wires.size;
+    for (const other of [row.housingA, row.housingB]) {
+      if (!partnerCount.has(other)) partnerCount.set(other, new Map());
+      partnerCount.get(other).set(other === row.housingA ? row.housingB : row.housingA, count);
+    }
+    return {
       housingA: row.housingA,
       housingB: row.housingB,
-      count: row.count,
-      wires: row.wires.join("、"),
-      configs: [...row.configs].join(" / ")
-    }))
-    .sort((a, b) => b.count - a.count || a.housingA.localeCompare(b.housingA));
+      count,
+      wires: [...row.wires].join("、"),
+      configs: [...row.cfgCount.keys()].join(" / "),
+      perConfig: [...row.cfgCount.entries()].map(([c, n]) => `${c}:${n}`).join("；"),
+      pkgIds: uniq([...row.wires].map((w1) => pkgByW1.get(w1)).filter(Boolean)).join("、")
+    };
+  });
+  const rankOf = (h, other, count) => {
+    const partners = partnerCount.get(h);
+    if (!partners) return 99;
+    const sorted = [...partners.entries()].sort((x, y) => y[1] - x[1]);
+    const idx = sorted.findIndex(([o]) => o === other);
+    if (idx < 0) return 99;
+    // 与更高计数并列时取并列最前名次
+    let rank = 1;
+    for (let i = 0; i < idx; i++) if (sorted[i][1] > count) rank += 1;
+    return rank;
+  };
+  for (const r of rows) {
+    const ra = rankOf(r.housingA, r.housingB, r.count);
+    const rb = rankOf(r.housingB, r.housingA, r.count);
+    const best = Math.min(ra, rb);
+    r.strength = best <= 1 ? "最强关联" : best === 2 ? "次强关联" : "普通关联";
+    r.status = "【候选工作包依据，待工艺验证】";
+  }
+  return rows.sort((a, b) => b.count - a.count || a.housingA.localeCompare(b.housingA));
 }
 
 function buildPackages(wires, configs, entries) {
@@ -478,30 +546,45 @@ function buildPackages(wires, configs, entries) {
         spliceEnds,
         spliceTime: spliceEnds > 0 ? null : null,
         spliceTimeNote: spliceEnds > 0 ? "SP/SC压接点工时待确认（在线超声波/冷压接/热缩）" : "",
+        plugMissing: plug1.missing || plug2.missing,
+        routeMissing: rt.takeTime == null || rt.routeTime == null,
         wireTime: round(wireTime, 2)
       };
       total += wireTime;
     }
 
+    // 连接器/护套放置工时：只取标准工时表明确的放置动作；未匹配到一律记0并标记【未找到工时源】，
+    // 不使用经验默认值参与TT/岗位判定。
     let connTime = 0;
+    let connMissingCount = 0;
+    const connCandidates = [
+      ["Connector placement"],
+      ["Connector", "Place"],
+      ["连接器", "放置"],
+      ["塑件", "放置"],
+      ["护套", "放置"]
+    ];
     for (const [h, c] of housingEntries) {
-      const maxPos = Math.max(
-        0,
-        ...ws
-          .filter((w) => clean(w.housing1) === h)
-          .map((w) => number(w.position1) || 0),
-        ...ws
-          .filter((w) => clean(w.housing2) === h)
-          .map((w) => number(w.position2) || 0)
-      );
-      let t = 1.7;
-      if (maxPos > 40) t = 5.4;
-      else if (maxPos > 6) t = 4.0;
-      connTime += t;
+      let connEntry = null;
+      for (const cand of connCandidates) {
+        connEntry = findStandardEntry(entries, cand);
+        if (connEntry) break;
+      }
+      if (connEntry) {
+        connTime += Number(connEntry.time) || 0;
+      } else {
+        connMissingCount += 1;
+      }
     }
     pkg.connectorPlacementSeconds = round(connTime, 2);
+    pkg.connectorPlacementMissing = connMissingCount > 0;
+    pkg.plugMissing = ws.some((w) => w._time && w._time.plugMissing);
+    pkg.routeMissing = ws.some((w) => w._time && w._time.routeMissing);
+    pkg.missingTimeSource = pkg.plugMissing || pkg.connectorPlacementMissing || pkg.routeMissing;
     pkg.estimatedSeconds = round(total + connTime, 2);
-    pkg.estimatedSecondsNote = "估算值，来自标准工时；实际以正式工时分摊与现场验证为准";
+    pkg.estimatedSecondsNote = pkg.missingTimeSource
+      ? "估算值含未匹配到正式工时的动作（插接/连接器放置/取布线），【未找到工时源】，TT与岗位数不作正式结论"
+      : "估算值，来自标准工时；实际以正式工时分摊与现场验证为准";
     for (const cfg of configs) {
       const cfgWires = ws.filter((w) => w.config[cfg]);
       const cfgTime =
@@ -517,46 +600,47 @@ function buildPackages(wires, configs, entries) {
 
 function buildPositionMatrix(packages) {
   const rows = [];
-  const seen = new Map();
+  const byCfg = new Map(); // cfg|housing|position -> [wires]
+  const pushRow = (pkgId, w, housing, position, terminal, seal) => {
+    rows.push({
+      pkgId,
+      housing,
+      position,
+      wire: w.w1 || w.drawingId,
+      terminal: terminal || "",
+      seal: clean(seal) && clean(seal) !== "-" ? seal : "",
+      configs: (w.configCodes || []).join(" / "),
+      status: "孔位在配置内唯一（责任随工作包归属）"
+    });
+    for (const cfg of w.configCodes || []) {
+      const key = cfg + "|" + housing + "|" + position;
+      if (!byCfg.has(key)) byCfg.set(key, []);
+      byCfg.get(key).push(w.w1 || w.drawingId);
+    }
+  };
   for (const pkg of packages) {
     for (const w of pkg.wires) {
       if (w.housing1 && w.housing1 !== "-" && !isSpliceCode(w.housing1) && w.position1 !== "") {
-        const key = w.housing1 + "|" + w.position1;
-        rows.push({
-          pkgId: pkg.id,
-          housing: w.housing1,
-          position: w.position1,
-          wire: w.w1 || w.drawingId,
-          terminal: w.terminal1 || "",
-          seal: clean(w.seal1) && clean(w.seal1) !== "-" ? w.seal1 : "",
-          configs: w.configCodes.join(" / "),
-          status: "待唯一责任确认"
-        });
-        if (seen.has(key)) seen.get(key).push(w.w1 || w.drawingId);
-        else seen.set(key, [w.w1 || w.drawingId]);
+        pushRow(pkg.id, w, w.housing1, w.position1, w.terminal1, w.seal1);
       }
       if (w.housing2 && w.housing2 !== "-" && !isSpliceCode(w.housing2) && w.position2 !== "") {
-        const key = w.housing2 + "|" + w.position2;
-        rows.push({
-          pkgId: pkg.id,
-          housing: w.housing2,
-          position: w.position2,
-          wire: w.w1 || w.drawingId,
-          terminal: w.terminal2 || "",
-          seal: clean(w.seal2) && clean(w.seal2) !== "-" ? w.seal2 : "",
-          configs: w.configCodes.join(" / "),
-          status: "待唯一责任确认"
-        });
-        if (seen.has(key)) seen.get(key).push(w.w1 || w.drawingId);
-        else seen.set(key, [w.w1 || w.drawingId]);
+        pushRow(pkg.id, w, w.housing2, w.position2, w.terminal2, w.seal2);
       }
     }
   }
+  // 按配置校验孔位唯一性：同一配置下同一护套同一孔位出现≥2根不同导线才是真冲突；
+  // 互斥配置同孔位用不同导线属合法复用，不判冲突。
   for (const row of rows) {
-    const key = row.housing + "|" + row.position;
-    const list = [...new Set(seen.get(key) || [])];
-    if (list.length > 1) {
-      row.status = `【存在冲突】同一孔位出现${list.length}根导线：${list.join("、")}`;
+    const conflicts = [];
+    for (const cfg of row.configs.split("/").map((s) => s.trim()).filter(Boolean)) {
+      const key = cfg + "|" + row.housing + "|" + row.position;
+      const list = [...new Set(byCfg.get(key) || [])];
+      if (list.length > 1) {
+        conflicts.push(`配置${cfg}：同一孔位出现${list.length}根导线（${list.join("、")}）`);
+      }
+    }
+    if (conflicts.length) {
+      row.status = `【存在冲突】${conflicts.join("；")}`;
     }
   }
   return rows;
@@ -614,7 +698,7 @@ function buildTimeMatrix(packages, configs, tt) {
   return rows;
 }
 
-function buildIssues(mbom, ebom, standard, pdf, packages, dotIssues, positionRows) {
+function buildIssues(mbom, ebom, standard, pdf, packages, dotIssues, positionRows, loopInfo = null) {
   const issues = [];
   const missingHousing = mbom.wires.filter(
     (w) => (!w.housing1 || w.housing1 === "-") && (!w.housing2 || w.housing2 === "-")
@@ -666,21 +750,30 @@ function buildIssues(mbom, ebom, standard, pdf, packages, dotIssues, positionRow
   issues.push({ category: "版本", detail: "文件版本/生效日期未在文件内自动读取，需人工补充后关闭。" });
   issues.push({ category: "TT", detail: "TT/产量未在四个文件中识别，需用户输入或在输出中补充。" });
   issues.push({ category: "预装工作包", detail: "当前工作包为数据驱动候选包（W3/W2/W1层级），必须按V2.6.1规则用护套关联、待插端、保护件顺序、受控半成品和TT验证后转正式。" });
-  issues.push({ category: "打圈工时", detail: "KIT/SUB输出岗位是否增加50秒打圈工时，需根据实际受控输出判定并查重。" });
-  issues.push({ category: "打圈工时", detail: "KIT/SUB输出岗位是否增加50秒打圈工时，需根据实际受控输出判定并查重。" });
+  // 打圈工时：参考固定50秒/件/岗位，按岗位计、与岗内人数无关；非强制——未填写按0秒计。
+  const loopTotal = (loopInfo && loopInfo.total) || 0;
+  if (loopInfo && loopInfo.includeCheck) {
+    issues.push({ category: "打圈工时", detail: "打圈查重：已确认标准工时表包含同一完整打圈动作，本次不再重复计入打圈工时（不按50秒重复累计）。" });
+  } else if (loopTotal > 0) {
+    issues.push({ category: "打圈工时", detail: `打圈工时已按填写值计入对应岗位（单KIT岗位/纯KIT：${loopInfo.values.singleKit || 0}s；KIT传递各输出岗位：${loopInfo.values.kitTransferMiddle || 0}s；KIT传递末岗位：${loopInfo.values.kitTransferLast || 0}s；SUB最后岗位：${loopInfo.values.subLast || 0}s）。打圈工时按岗位计、与岗内人数无关；参考固定50秒/件/岗位；若标准工时表已含同一完整打圈动作，请勾选“标准工时已含打圈”以免重复累计。` });
+  } else {
+    issues.push({ category: "打圈工时", detail: "未填写打圈工时（按0秒计，不强制）。如现场需对输出半成品打圈，请在对应岗位填写打圈工时（参考固定50秒/件/岗位，按岗位计、与岗内人数无关）后复核TT。" });
+  }
+  // 漆点编码实际可用容量：未获现场批准前标记待确认
+  issues.push({ category: "同色线编码容量", detail: "【待确认——漆点编码实际可用容量未批准】软件按批准八色（PK/RD/OG/YE/GN/WH/VT/BK）、单编码最多4点生成494种标准化编码；现场实际识别容量、最大点数与多色组合上限须由现场批准后关闭。" });
   issues.push({ category: "布局", detail: "未提供现场布局图，人员站位、物流、缓存仅能输出候选。" });
 
-  // 工时源缺失统计：取/布线动作或长度分段未匹配、插接工时使用默认值兜底
+  // 工时源缺失统计：取/布线动作或长度分段未匹配、插接/连接器放置未匹配到标准工时（一律不注入经验默认值）
   let missingRouteCount = 0;
-  let defaultPlugCount = 0;
+  let missingPlugCount = 0;
+  let missingConnCount = 0;
   for (const p of packages) {
     for (const w of p.wires || []) {
       const t = w._time || {};
       if (t.rt && (t.rt.takeTime == null || t.rt.routeTime == null)) missingRouteCount += 1;
-      for (const side of [t.plug1, t.plug2]) {
-        if (side && /默认/.test(String(side.ref || ""))) defaultPlugCount += 1;
-      }
+      if (t.plugMissing) missingPlugCount += 1;
     }
+    if (p.connectorPlacementMissing) missingConnCount += 1;
   }
   if (missingRouteCount) {
     issues.push({
@@ -688,10 +781,23 @@ function buildIssues(mbom, ebom, standard, pdf, packages, dotIssues, positionRow
       detail: `${missingRouteCount}根导线未匹配到标准工时中的取/布线动作或对应长度分段，其取线/布线工时为空（表格对应列空白），请补充标准工时表对应分段后再复核TT。`
     });
   }
-  if (defaultPlugCount) {
+  if (missingPlugCount) {
     issues.push({
       category: "工时源",
-      detail: `${defaultPlugCount}个插接端未匹配到标准工时插接动作，已使用默认估算值（带密封4.0s/不带密封2.5s/屏蔽补偿1.6s）参与估算，【未找到工时源】，需以正式工时分摊复核。`
+      detail: `${missingPlugCount}个插接端未匹配到标准工时插接动作【未找到工时源】，未计入正式工时（不注入经验默认值）；须补充正式工时分摊后再复核TT与岗位数。`
+    });
+  }
+  if (missingConnCount) {
+    issues.push({
+      category: "工时源",
+      detail: `${missingConnCount}个护套未匹配到标准工时中的连接器/塑件放置动作【未找到工时源】，放置工时按0处理（不注入经验默认值）；须补充正式工时分摊后再复核TT与岗位数。`
+    });
+  }
+  const anyMissingTimeSource = packages.some((p) => p.missingTimeSource);
+  if (anyMissingTimeSource) {
+    issues.push({
+      category: "工时源",
+      detail: "存在未匹配到正式工时的动作（插接/连接器放置/取布线），当前TT与岗位数为【候选估算】，不作为正式结论；须补齐正式工时分摊后重新验证。"
     });
   }
 
@@ -883,75 +989,63 @@ function allocateStations(packages, maxStations, tt, modeLabel) {
   }));
 }
 
-function packPackages(items, stationCount, tt, stationType) {
-  if (!stationCount || stationCount <= 0) return [];
-  const count = Math.min(stationCount, Math.max(1, items.length));
-  const bins = Array.from({ length: count }, (_, i) => ({
-    stationNo: 0,
-    seconds: 0,
-    wires: 0,
-    packageIds: [],
-    configs: new Set()
-  }));
+function packPackages(items, stationCount, tt, stationType, capacity, configs) {
+  if (!items || !items.length) return [];
+  const cap = Number(capacity != null ? capacity : tt) || 0; // 本岗位类型的有效容量（TT-该类型打圈预留；allow时=TT×人数-预留）
+  const cfgList = (configs && configs.length) ? configs : uniq(items.flatMap((p) => p.configs || []));
+  const packageMap = new Map(items.map((p) => [p.id, p]));
   const sorted = items.slice().sort((a, b) => pkgWeight(b) - pkgWeight(a));
-  for (const p of sorted) {
-    const bin = bins.reduce((best, b) => (b.seconds <= best.seconds ? b : best), bins[0]);
-    bin.seconds += pkgWeight(p);
+  const mk = () => ({ seconds: 0, wires: 0, packageIds: [], configs: new Set() });
+  const bins = [];
+  const put = (bin, p) => {
+    const w = pkgWeight(p);
+    bin.seconds += w;
     bin.wires += p.wireCount || 0;
     bin.packageIds.push(p.id);
-    for (const c of p.configs) bin.configs.add(c);
-  }
-  // 超限桶平衡：把超TT桶中最大的可移包移到最空桶（移后双方都不超TT才执行），减少轻微超限
-  const ttLimit = Number(tt) || 0;
-  const pkgSecMap = new Map(items.map((p) => [p.id, pkgWeight(p)]));
-  const pkgWireMap = new Map(items.map((p) => [p.id, p.wireCount || 0]));
-  const pkgCfgMap = new Map(items.map((p) => [p.id, p.configs || []]));
-  if (ttLimit > 0) {
-    let improved = true;
-    let guard = 0;
-    while (improved && guard < 200) {
-      improved = false;
-      guard += 1;
+    for (const c of p.configs || []) bin.configs.add(c);
+  };
+  if (cap > 0) {
+    // 容量约束装箱（FFD，方案A）：每岗包工时 ≤ 本类型有效容量；放不下则新开岗位。
+    // 单包本身超过容量时单独成岗（如实标超）。
+    for (const p of sorted) {
+      const w = pkgWeight(p);
+      let target = null;
       for (let i = 0; i < bins.length; i++) {
-        if (bins[i].seconds <= ttLimit) continue;
-        let j = 0;
-        for (let k = 1; k < bins.length; k++) {
-          if (bins[k].seconds < bins[j].seconds) j = k;
-        }
-        if (j === i) continue;
-        let bestMove = null;
-        for (const pid of bins[i].packageIds) {
-          const sec = pkgSecMap.get(pid) || 0;
-          if (bins[i].seconds - sec <= ttLimit && bins[j].seconds + sec <= ttLimit) {
-            if (!bestMove || sec > bestMove.sec) bestMove = { pid, sec };
-          }
-        }
-        if (bestMove) {
-          bins[i].packageIds = bins[i].packageIds.filter((p) => p !== bestMove.pid);
-          bins[i].seconds -= bestMove.sec;
-          bins[i].wires -= pkgWireMap.get(bestMove.pid) || 0;
-          bins[j].packageIds.push(bestMove.pid);
-          bins[j].seconds += bestMove.sec;
-          bins[j].wires += pkgWireMap.get(bestMove.pid) || 0;
-          for (const c of pkgCfgMap.get(bestMove.pid) || []) bins[j].configs.add(c);
-          improved = true;
+        if (bins[i].seconds + w <= cap) {
+          if (!target || bins[i].seconds > target.seconds) target = bins[i];
         }
       }
+      if (!target) { target = mk(); bins.push(target); }
+      put(target, p);
+    }
+  } else {
+    // 无有效节拍：退回简单贪心均衡
+    const need = Math.max(1, Math.min(stationCount || 1, items.length));
+    for (let i = 0; i < need; i++) bins.push(mk());
+    for (const p of sorted) {
+      const b = bins.reduce((a, x) => (x.seconds <= a.seconds ? x : a), bins[0]);
+      put(b, p);
     }
   }
-  return bins.map((b) => ({
-    stationNo: 0,
-    stationType,
-    modeLabel: stationType,
-    packageIds: b.packageIds.join("、"),
-    packageCount: b.packageIds.length,
-    wireCount: b.wires,
-    totalSeconds: round(b.seconds, 2),
-    tt: tt || "",
-    loadPercent: tt && tt > 0 ? round((b.seconds / tt) * 100, 1) : null,
-    status: tt && tt > 0 && b.seconds > tt ? "【超TT，需拆分或增岗】" : "【候选方案，待工艺验证】",
-    configs: [...b.configs].join(" / ")
-  }));
+  return bins.map((b, i) => {
+    // 岗位工时按配置分别求和，取最大值作为该岗位工时（单件只产一个配置，不叠加）
+    const cfgSec = stationConfigSeconds(b.packageIds, packageMap, cfgList);
+    const sec = cfgSec.max;
+    return {
+      stationNo: i + 1,
+      stationType,
+      modeLabel: stationType,
+      packageIds: b.packageIds.join("、"),
+      packageCount: b.packageIds.length,
+      wireCount: b.wires,
+      totalSeconds: round(sec, 2),
+      configSeconds: cfgSec.byCfg,
+      tt: tt || "",
+      loadPercent: tt && tt > 0 ? round((sec / tt) * 100, 1) : null,
+      status: tt && tt > 0 && sec > tt ? "【超TT，需拆分或增岗】" : "【候选方案，待工艺验证】",
+      configs: [...b.configs].join(" / ")
+    };
+  });
 }
 
 function labelTransferBins(bins) {
@@ -968,19 +1062,21 @@ function labelTransferBins(bins) {
   });
 }
 
-function allocateStationsByMode(packages, maxStations, tt, modeLabel, modeValue, maxSubFrames = null) {
+function allocateStationsByMode(packages, maxStations, tt, modeLabel, modeValue, maxSubFrames = null, capacities = null, configs = null) {
   if (!maxStations || maxStations <= 0) return [];
+  const capKit = capacities && capacities.kit != null ? capacities.kit : tt;
+  const capSub = capacities && capacities.sub != null ? capacities.sub : tt;
   if (modeValue === "pure-kit") {
-    return packPackages(packages, maxStations, tt, "纯KIT岗位").map((b, i) => ({ ...b, stationNo: i + 1 }));
+    return packPackages(packages, maxStations, tt, "纯KIT岗位", capKit, configs).map((b, i) => ({ ...b, stationNo: i + 1 }));
   }
   if (modeValue === "kit-transfer-kit") {
-    return labelTransferBins(packPackages(packages, maxStations, tt, "KIT传递岗+KIT岗位")).map((b, i) => ({ ...b, stationNo: i + 1 }));
+    return labelTransferBins(packPackages(packages, maxStations, tt, "KIT传递岗+KIT岗位", capKit, configs)).map((b, i) => ({ ...b, stationNo: i + 1 }));
   }
   if (modeValue === "pure-sub") {
     const count = maxSubFrames && maxSubFrames > 0
       ? Math.max(maxStations, Math.ceil(packages.length / maxSubFrames))
       : maxStations;
-    return packPackages(packages, count, tt, "纯SUB岗位").map((b, i) => ({ ...b, stationNo: i + 1 }));
+    return packPackages(packages, count, tt, "纯SUB岗位", capSub, configs).map((b, i) => ({ ...b, stationNo: i + 1 }));
   }
   if (modeValue === "sub-kit" || modeValue === "sub-kit-transfer") {
     const totalSec = sum(packages.map((p) => pkgWeight(p))) || 1;
@@ -993,13 +1089,13 @@ function allocateStationsByMode(packages, maxStations, tt, modeLabel, modeValue,
       subCount = Math.max(subCount, Math.ceil(subItems.length / maxSubFrames));
     }
     const kitCount = Math.max(1, maxStations - subCount);
-    let subBins = packPackages(subItems, subCount, tt, "SUB岗位");
-    let kitBins = packPackages(kitItems, kitCount, tt, modeValue === "sub-kit" ? "纯KIT岗位" : "KIT传递岗+KIT岗位");
+    let subBins = packPackages(subItems, subCount, tt, "SUB岗位", capSub, configs);
+    let kitBins = packPackages(kitItems, kitCount, tt, modeValue === "sub-kit" ? "纯KIT岗位" : "KIT传递岗+KIT岗位", capKit, configs);
     if (modeValue === "sub-kit-transfer") kitBins = labelTransferBins(kitBins);
     const all = [...subBins, ...kitBins];
     return all.map((b, i) => ({ ...b, stationNo: i + 1 }));
   }
-  return packPackages(packages, maxStations, tt, modeLabel).map((b, i) => ({ ...b, stationNo: i + 1 }));
+  return packPackages(packages, maxStations, tt, modeLabel, capKit, configs).map((b, i) => ({ ...b, stationNo: i + 1 }));
 }
 
 // ==================== 同岗位护套分组（一组=一个岗位，组间强制分岗） ====================
@@ -1057,7 +1153,7 @@ function parseSameStationGroups(groups, issues) {
   return parsed;
 }
 
-function applySameStationGroups(stationAllocation, parsedGroups, packages, issues, preassemblyMode, overTtMode = "force-same", tt = null, loopTimes = {}) {
+function applySameStationGroups(stationAllocation, parsedGroups, packages, issues, preassemblyMode, overTtMode = "force-same", tt = null, loopTimes = {}, overTtPolicy = "forbid", maxPeople = 2, configs = null) {
   if (!parsedGroups.length) return { stationAllocation, ttRows: [] };
   const packageMap = new Map(packages.map((p) => [p.id, p]));
   const ttNum = Number(tt) || 0;
@@ -1155,7 +1251,9 @@ function applySameStationGroups(stationAllocation, parsedGroups, packages, issue
   }
 
   const makeAlloc = (pkgIds, no, extra = {}) => {
-    const seconds = pkgIds.reduce((a, pid) => a + ((packageMap.get(pid) && pkgWeight(packageMap.get(pid))) || 0), 0);
+    const cfgList = (configs && configs.length) ? configs : uniq(packages.flatMap((p) => p.configs || []));
+    const cfgSec = stationConfigSeconds(pkgIds, packageMap, cfgList);
+    const seconds = cfgSec.max;
     const wires = pkgIds.reduce((a, pid) => {
       const p = packageMap.get(pid);
       return a + (p ? (p.wireCount || (p.wires || []).length) : 0);
@@ -1168,6 +1266,7 @@ function applySameStationGroups(stationAllocation, parsedGroups, packages, issue
       packageCount: pkgIds.length,
       wireCount: wires,
       totalSeconds: round(seconds, 2),
+      configSeconds: cfgSec.byCfg,
       tt,
       loadPercent: tt && tt > 0 ? round((seconds / tt) * 100, 1) : null,
       status: tt && tt > 0 && seconds > tt ? "【超TT，需拆分或增岗】" : "【候选方案，待工艺验证】",
@@ -1185,10 +1284,18 @@ function applySameStationGroups(stationAllocation, parsedGroups, packages, issue
     const core = groupPkgs[gi];
     const ride = groupRideAlong[gi];
     const all = [...core, ...ride];
-    const seconds = round(all.reduce((a, pid) => a + secOf(pid), 0), 2);
+    // 合并工时按配置口径（单件只产一个配置，不叠加各配置工时）
+    const cfgList = (configs && configs.length) ? configs : uniq(packages.flatMap((p) => p.configs || []));
+    const cfgSec = stationConfigSeconds(all, packageMap, cfgList);
+    const seconds = round(cfgSec.max, 2);
     const loopEst = groupLoopEstimate(g);
     const secondsWithLoop = round(seconds + loopEst, 2);
-    const over = ttNum > 0 && secondsWithLoop > ttNum;
+    // 与岗位明细一致的超节拍口径：
+    //   overSingle = 超过单人TT → 需“多人合干或拆分”；overMulti = 超过多人合干上限 → 即使多人仍超
+    const effTt = ttNum > 0 ? ttNum * (overTtPolicy === "allow" ? maxPeople : 1) : 0;
+    const overSingle = ttNum > 0 && secondsWithLoop > ttNum;
+    const overMulti = ttNum > 0 && secondsWithLoop > effTt;
+    const canShare = overTtPolicy === "allow" && overSingle && !overMulti;
     const mode = overTtMode === "best-rate" ? "best-rate" : "force-same";
     const handleModeLabel = mode === "best-rate" ? "按最佳插接率拆分" : "强制同岗";
     const groupEntry = (pkgIds, no, extra = {}) => makeAlloc(pkgIds, no, {
@@ -1213,13 +1320,13 @@ function applySameStationGroups(stationAllocation, parsedGroups, packages, issue
       });
     };
     const fmtBins = (used, allCount, maxShow = 12) => {
-      const parts = used.map((b, i) => `岗位${i + 1}:${round(b.sec, 2)}s(${Math.round((b.sec / ttNum) * 100)}%)`);
+      const parts = used.map((b, i) => `岗位${i + 1}:${round(b.sec, 2)}s${loopEst ? `+打圈${loopEst}s` : ""}(${Math.round(((b.sec + loopEst) / ttNum) * 100)}%)`);
       if (parts.length > maxShow) return `共${used.length}个岗位，示例：` + parts.slice(0, maxShow).join("；") + `；…其余${used.length - maxShow}个岗位见候选岗位分配表`;
       return parts.join("；");
     };
 
-    if (!over) {
-      // 未超节拍：保留同岗
+    if (!overSingle) {
+      // 未超过单人TT：保留同岗，不超节拍
       result.push(groupEntry(all, result.length + 1, { groupName: g.name }));
       inserted.add(gi);
       pushTtRow("未超节拍（保留同岗）", loopEst ? `含打圈估算${loopEst}s` : "", "【候选方案，待工艺验证】");
@@ -1230,19 +1337,58 @@ function applySameStationGroups(stationAllocation, parsedGroups, packages, issue
       // 强制同岗：即使超节拍也保留在一个岗位
       result.push(groupEntry(all, result.length + 1, { groupName: g.name }));
       inserted.add(gi);
-      pushTtRow(
-        "超节拍-强制同岗",
-        `合并后含打圈约${Math.round((secondsWithLoop / ttNum) * 100)}%负荷（包工时${seconds}s${loopEst ? `+打圈${loopEst}s` : ""}），超出TT ${ttNum}s，岗位已在岗位表标记【超TT，需拆分或增岗】，需人工调整`,
-        "【超TT，需拆分或增岗】"
-      );
+      if (canShare) {
+        // 允许超节拍且多人合干能装下 → 可超节拍建议N人合干（与岗位明细表口径一致）
+        const n = Math.max(1, Math.ceil(secondsWithLoop / ttNum));
+        pushTtRow(
+          "超节拍-强制同岗（可超节拍多人合干）",
+          `合并后含打圈约${Math.round((secondsWithLoop / ttNum) * 100)}%负荷（包工时${seconds}s${loopEst ? `+打圈${loopEst}s` : ""}），建议${n}人合干（每人分摊≤TT）`,
+          `【可超节拍：建议${n}人合干（每人分摊≤TT）】`
+        );
+      } else if (overTtPolicy === "allow") {
+        pushTtRow(
+          "超节拍-强制同岗（仍超多人合干上限）",
+          `合并后含打圈约${Math.round((secondsWithLoop / ttNum) * 100)}%负荷（包工时${seconds}s${loopEst ? `+打圈${loopEst}s` : ""}），即使按${maxPeople}人合干仍超（${secondsWithLoop}s vs ${ttNum}×${maxPeople}=${effTt}s），需增岗`,
+          "【超TT：即使按" + maxPeople + "人合干仍超，需增岗】"
+        );
+      } else {
+        pushTtRow(
+          "超节拍-强制同岗",
+          `合并后含打圈约${Math.round((secondsWithLoop / ttNum) * 100)}%负荷（包工时${seconds}s${loopEst ? `+打圈${loopEst}s` : ""}），超出TT ${ttNum}s，岗位已在岗位表标记【超TT，需拆分或增岗】，需人工调整`,
+          "【超TT，需拆分或增岗】"
+        );
+      }
       return;
     }
 
-    // 按最佳插接率拆分：优先把用户填入的护套（core）尽量放在同一岗位
+    // 按最佳插接率拆分：优先把用户填入的护套（core）尽量放在同一岗位。
+    // 每拆出的岗位之后还会各加一次打圈，故拆分的容量预留打圈（splitCap = TT - 打圈），
+    // 保证“分拆后每岗 + 打圈 ≤ TT”，组表与岗位表口径一致。
+    // 打圈为每岗一次、不可再分的工时：若打圈本身 ≥ TT，分拆无法解决，回退为与岗位表一致的多人合干/增岗处理。
     const coreSec = core.reduce((a, pid) => a + secOf(pid), 0);
-    const k = Math.max(2, Math.ceil(seconds / ttNum));
+    if (loopEst > 0 && ttNum > 0 && loopEst >= ttNum) {
+      result.push(groupEntry(all, result.length + 1, { groupName: g.name }));
+      inserted.add(gi);
+      if (overTtPolicy === "allow") {
+        const n = Math.max(1, Math.ceil(secondsWithLoop / ttNum));
+        pushTtRow(
+          "超节拍-强制同岗（打圈不可分割，多人合干）",
+          `打圈${loopEst}s 已≥TT ${ttNum}s，分拆无法解决；合并含打圈约${Math.round((secondsWithLoop / ttNum) * 100)}%负荷，建议${n}人合干（每人分摊≤TT）`,
+          `【可超节拍：建议${n}人合干（每人分摊≤TT）】`
+        );
+      } else {
+        pushTtRow(
+          "超节拍-强制同岗（打圈不可分割）",
+          `打圈${loopEst}s 已≥TT ${ttNum}s，分拆无法解决；超出TT需拆分/增岗并单独安排打圈`,
+          "【超TT，需拆分或增岗】"
+        );
+      }
+      return;
+    }
+    const splitCap = Math.max(1, ttNum - loopEst);
+    const k = Math.max(2, Math.ceil(seconds / splitCap));
     const bins = Array.from({ length: k }, () => ({ pkgs: [], sec: 0 }));
-    if (coreSec <= ttNum) {
+    if (coreSec <= splitCap) {
       // 用户护套自身可同岗：主岗位放core，溢出工作按负载拆分
       bins[0].pkgs.push(...core);
       bins[0].sec = coreSec;
@@ -1375,7 +1521,7 @@ function checkSameStationGroupResult(stationDetails, parsedGroups, issues) {
   }
 }
 
-function buildStationDetails(packages, stationAllocation, options, ebomMaterials, pdfKeywords, ultrasonicRules, forcedOfflineHousings = [], loopTimes = {}, configs = []) {
+function buildStationDetails(packages, stationAllocation, options, ebomMaterials, pdfKeywords, ultrasonicRules, forcedOfflineHousings = [], loopTimes = {}, configs = [], tt = 0, overTtPolicy = "forbid", maxPeople = 2) {
   const region = (options.regions && options.regions[0]) || "未指定部位";
   const onlineUltrasonic = options.onlineUltrasonic === true || options.onlineUltrasonic === "yes" || options.onlineUltrasonic === "是";
   const forcedSet = new Set((forcedOfflineHousings || []).map(clean).filter(Boolean));
@@ -1572,11 +1718,35 @@ function buildStationDetails(packages, stationAllocation, options, ebomMaterials
     } else if (stType.includes("SUB")) {
       loopSeconds = isLastSub ? Number(loopTimes.subLast || 0) : 0;
     }
-    all.totalSeconds = round((all.totalSeconds || 0) + loopSeconds);
+    // 岗位总工时按配置口径：对每个配置分别求和（含打圈），取最大值作为该岗位工时。
+    // 单件产品只生产一个配置，不把各配置工时叠加，避免假超TT。
+    const cfgSec = stationConfigSeconds(binPackages.map((p) => p.id), packageMap, configs);
+    const baseSeconds = cfgSec.max;
+    const totalSeconds = round(baseSeconds + loopSeconds, 2);
+    all.configSeconds = cfgSec.byCfg;
+    all.totalSeconds = totalSeconds;
     const configTime = {};
     for (const cfg of configs) {
-      const cfgSum = binPackages.reduce((sum, p) => sum + (p.configTime && p.configTime[cfg] ? p.configTime[cfg] : 0), 0);
-      configTime[cfg] = round(cfgSum + loopSeconds, 2);
+      configTime[cfg] = round((cfgSec.byCfg[cfg] || 0) + loopSeconds, 2);
+    }
+    // 用“含打圈的最终工时”覆盖负荷率 / 建议人数 / 超TT状态：
+    // 禁止超节拍：超TT则标【超TT】；允许超节拍：岗位可超TT（多人合干），给出建议人数，每人分摊后≤TT。
+    const worker = tt && tt > 0 ? Math.max(1, Math.ceil(totalSeconds / tt)) : 1;
+    if (tt && tt > 0) {
+      all.loadPercent = round((totalSeconds / tt) * 100, 1);
+      all.workerCount = overTtPolicy === "allow" ? worker : Math.max(1, Math.ceil(totalSeconds / tt));
+      if (overTtPolicy === "allow") {
+        if (totalSeconds > tt * maxPeople) {
+          all.status = `【超TT：即使按${maxPeople}人合干仍超，需增岗】`;
+        } else if (totalSeconds > tt) {
+          all.status = `【可超节拍：建议${worker}人合干（每人分摊≤TT）】`;
+        } else {
+          all.status = "【候选方案，待工艺验证】";
+        }
+      } else {
+        all.status = totalSeconds > tt ? "【超TT，需拆分或增岗】" : "【候选方案，待工艺验证】";
+      }
+      all.tt = tt; // 显示用目标节拍（装桶用有效节拍，展示用原TT）
     }
 
     return {
@@ -1586,7 +1756,9 @@ function buildStationDetails(packages, stationAllocation, options, ebomMaterials
       regionRule: REGION_RULES[region] || "按V2.6.1预装工作包规则：以护套关联、待插端、保护件顺序、受控半成品和TT形成工作包。",
       modeLabel: all.modeLabel,
       totalSeconds: all.totalSeconds,
+      loadPercent: all.loadPercent != null ? all.loadPercent : null,
       loopTimeSeconds: loopSeconds,
+      workerCount: all.workerCount || 1,
       configTime,
       wireRows,
       materials,
@@ -1641,14 +1813,17 @@ function buildStationDotMatrix(stationDetails) {
   return { rows, issues };
 }
 
-function buildGrommetStations(grommetStations, region, configs, startNo) {
+function buildGrommetStations(grommetStations, region, configs, startNo, loopSeconds = 0, tt = 0) {
   return (grommetStations || []).map((g, i) => {
     const no = startNo + i;
     const name = `${String(no).padStart(2, "0")}-${region || "未指定"}-胶套-${clean(g.name)}`;
     const housings = String(g.housings || "").split(/[,，;；]+/).map(clean).filter(Boolean);
     const time = Number(g.time) || 0;
+    // 胶套专属岗位为固定式KIT类输出岗位，会产出受控半成品（装好的胶套/防水泥），按“单KIT打圈值”计一次打圈；
+    // 打圈按岗位计、与岗内人数无关；未填写打圈值则 loopSeconds=0（不强制）。
+    const totalSeconds = round(time + loopSeconds, 2);
     const configTime = {};
-    for (const cfg of configs) configTime[cfg] = time;
+    for (const cfg of configs) configTime[cfg] = round(totalSeconds, 2);
     const wireRows = housings.map((h) => ({
       w1: "",
       drawingId: "",
@@ -1670,17 +1845,21 @@ function buildGrommetStations(grommetStations, region, configs, startNo) {
       stationNo: no,
       stationName: name,
       region: region || "未指定",
-      regionRule: "胶套专属岗位：安装防水泥和胶套；胶套后面的护套强制线下插接完毕。",
+      regionRule: "胶套专属岗位：安装防水泥和胶套；胶套后面的护套强制线下插接完毕；本岗位有受控半成品输出，按固定KIT类计一次打圈。",
       modeLabel: "胶套专属岗位",
       stationType: "胶套岗位",
-      totalSeconds: time,
-      loopTimeSeconds: 0,
+      totalSeconds,
+      loopTimeSeconds: loopSeconds,
+      workerCount: tt && tt > 0 ? Math.max(1, Math.ceil(totalSeconds / tt)) : 1,
       configTime,
       wireRows,
       materials: [],
       packageIds: "",
       tapeRemark: "胶套/防水泥作业",
-      status: "【候选方案，待工艺验证】"
+      loadPercent: tt && tt > 0 ? round((totalSeconds / tt) * 100, 1) : null,
+      status: (tt && tt > 0 && totalSeconds > tt)
+        ? `【超TT，需拆分或增岗】${loopSeconds ? `（含打圈${loopSeconds}s）` : ""}`
+        : `【候选方案，待工艺验证】${loopSeconds ? `（含打圈${loopSeconds}s）` : ""}`
     };
   });
 }
@@ -1694,7 +1873,15 @@ async function analyzeProject(files, options = {}) {
   const maxStations = options.maxStations != null ? Number(options.maxStations) : null;
   const autoStations = options.autoStations === true || options.autoStations === "true" || options.autoStations === "yes";
   const maxSubFrames = options.maxSubFrames != null ? Number(options.maxSubFrames) : null;
-  const loopTimes = options.loopTimes || {};
+  const loopTimes = { ...(options.loopTimes || {}) };
+  // V2.6.1：打圈固定50秒/件/岗位。若用户确认“标准工时已含打圈动作”，则全部置0（查重，不重复累计）
+  const standardIncludesLoop = options.standardIncludesLoop === true || options.standardIncludesLoop === "true" || options.standardIncludesLoop === "yes";
+  if (standardIncludesLoop) {
+    loopTimes.singleKit = 0;
+    loopTimes.kitTransferMiddle = 0;
+    loopTimes.kitTransferLast = 0;
+    loopTimes.subLast = 0;
+  }
   const preassemblyMode = options.preassemblyMode || "";
   const onlineUltrasonic = options.onlineUltrasonic === true || options.onlineUltrasonic === "yes" || options.onlineUltrasonic === "是";
   const onlineUltrasonicMaxGroupsPerConfig = options.onlineUltrasonicMaxGroupsPerConfig != null ? Number(options.onlineUltrasonicMaxGroupsPerConfig) : null;
@@ -1745,34 +1932,54 @@ async function analyzeProject(files, options = {}) {
   const fileAnalysis = buildFileAnalysis(mergedMbom);
   const ultrasonicRules = buildUltrasonicRules(wires, configs, noOnlineUltrasonicSplices, onlineUltrasonicMaxGroupsPerConfig, onlineUltrasonicMaxTotalGroups);
   const wireRows = buildWireRows(wires);
-  const housingMatrix = buildHousingMatrix(wires);
   const packages = buildPackages(wires, configs, standard.entries);
+  const housingMatrix = buildHousingMatrix(wires, packages);
   const positionRows = buildPositionMatrix(packages);
   const timeRows = buildTimeMatrix(packages, configs, tt);
   const ledger = buildLedger(files, mergedMbom, ebom, standard, pdf);
   const pdfKeywords = buildPDFKeywordTable(pdf);
+  // 打圈预留按岗位类型分别计算（kit：KIT/传递各输出岗位各计一次；sub：SUB末岗位计一次）
+  const reserves = loopReserves(loopTimes, preassemblyMode);
+  // 超节拍处理：禁止(默认，每岗位包工时≤有效容量) / 允许(单岗位可超节拍，由多人合干、每人分摊≤节拍)
+  const overTtPolicy = options.overTtPolicy === "allow" ? "allow" : "forbid";
+  const maxPeople = (Number(options.maxPeoplePerStation) >= 1) ? Math.floor(Number(options.maxPeoplePerStation)) : 2;
+  // 每岗位可承载的包工时：禁止超节拍 = TT - 该类型打圈预留；允许超节拍 = TT×人数 - 预留（预留只扣一次）
+  const peopleFactor = overTtPolicy === "allow" ? maxPeople : 1;
+  const capKit = tt && tt > 0 ? Math.max(1, tt * peopleFactor - reserves.kit) : (tt || 0);
+  const capSub = tt && tt > 0 ? Math.max(1, tt * peopleFactor - reserves.sub) : (tt || 0);
+  const hasSubType = ["pure-sub", "sub-kit", "sub-kit-transfer"].includes(preassemblyMode);
+  const hasKitType = preassemblyMode !== "pure-sub";
+  // 岗位数计算用的代表容量：SUB与KIT并存时取较严（较小）者
+  const ttCap = hasSubType && hasKitType ? Math.min(capKit, capSub) : (hasSubType ? capSub : capKit);
   let stationCount = maxStations;
   let stationCountNote = "";
   if (tt && tt > 0) {
-    // 岗位数以“单配置最高工时”为基准：先算出每个配置的总工时，取最高者 ÷ TT。
+    // 岗位数以“单配置最高工时”为基准：先算出每个配置的总工时，取最高者 ÷ 每岗位承载量。
     // 单件产品只生产一个配置的导线，故不叠加各配置工时。
     const cfgTotals = configs.map((cfg) => round(sum(packages.map((p) => (p.configTime && p.configTime[cfg]) || 0)), 2));
     const maxCfg = Math.max(...cfgTotals.filter((t) => t > 0), 0);
-    const needByTt = maxCfg > 0 ? Math.ceil(maxCfg / tt) : 0;
+    const needByTt = maxCfg > 0 ? Math.ceil(maxCfg / ttCap) : 0;
     if (needByTt > 0 && needByTt > (stationCount || 0)) {
-      // 用户填的最多岗位数不足，按TT自动扩岗（最高配置也不超节拍）
+      // 用户填的最多岗位数不足，按TT自动扩岗
       stationCount = needByTt;
-      stationCountNote = `按TT自动扩岗：最高配置工时${maxCfg}s÷TT${tt}s需${needByTt}个岗位（原设置${maxStations || "未设置"}；各配置工时：${configs.map((c, i) => `${c}=${cfgTotals[i]}s`).join("；")}）`;
+      stationCountNote = overTtPolicy === "allow"
+        ? `按TT自动扩岗（可超节拍，单岗位最多${maxPeople}人合干）：最高配置工时${maxCfg}s÷每岗承载${ttCap}s（=TT×${maxPeople}-打圈预留）需${needByTt}个岗位`
+        : `按TT自动扩岗（禁止超节拍，含打圈预留：KIT侧${reserves.kit}s/SUB侧${reserves.sub}s）：最高配置工时${maxCfg}s÷每岗承载${ttCap}s需${needByTt}个岗位`;
     }
   }
   if (!stationCount && autoStations && tt > 0) {
-    // 兜底：未设置岗位数且TT有效时，按最高配置工时计算
     const cfgTotals = configs.map((cfg) => round(sum(packages.map((p) => (p.configTime && p.configTime[cfg]) || 0)), 2));
     const maxCfg = Math.max(...cfgTotals.filter((t) => t > 0), 0);
-    stationCount = Math.max(1, Math.ceil(maxCfg / tt));
+    stationCount = Math.max(1, Math.ceil(maxCfg / ttCap));
   }
-  let stationAllocation = allocateStationsByMode(packages, stationCount, tt, modeLabel, preassemblyMode, maxSubFrames);
-  const groupApplyResult = applySameStationGroups(stationAllocation, parsedSameStationGroups, packages, groupIssues, preassemblyMode, sameStationOverTtMode, tt, loopTimes);
+  // 硬阻断：既无TT也无最多岗位数时，无法形成候选岗位（不静默输出0岗位）
+  if (!stationCount && !autoStations) {
+    stationCountNote = tt && tt > 0
+      ? "已填写TT但未识别到任何配置工时，无法按TT形成候选岗位；请确认标准工时文件与MBOM匹配后重新生成。"
+      : "未填写目标节拍TT也未填写最多预装岗位数，无法形成候选岗位；请填写TT（或填写最多岗位数）后重新生成。";
+  }
+  let stationAllocation = allocateStationsByMode(packages, stationCount, tt, modeLabel, preassemblyMode, maxSubFrames, { kit: capKit, sub: capSub }, configs);
+  const groupApplyResult = applySameStationGroups(stationAllocation, parsedSameStationGroups, packages, groupIssues, preassemblyMode, sameStationOverTtMode, tt, loopTimes, overTtPolicy, maxPeople, configs);
   stationAllocation = groupApplyResult.stationAllocation;
   for (const r of groupApplyResult.ttRows) {
     if (String(r.outcome).startsWith("超节拍")) {
@@ -1791,10 +1998,13 @@ async function analyzeProject(files, options = {}) {
     ultrasonicRules,
     forcedOfflineHousings,
     loopTimes,
-    configs
+    configs,
+    tt,
+    overTtPolicy,
+    maxPeople
   );
   checkSameStationGroupResult(stationDetails, parsedSameStationGroups, groupIssues);
-  const grommetDetails = buildGrommetStations(grommetStations, regions[0] || "未指定", configs, stationDetails.length + 1);
+  const grommetDetails = buildGrommetStations(grommetStations, regions[0] || "未指定", configs, stationDetails.length + 1, Number(loopTimes.singleKit) || 0, tt || 0);
   stationDetails.push(...grommetDetails);
   stationAllocation.push(...grommetDetails.map((g) => ({
     stationNo: g.stationNo,
@@ -1804,6 +2014,7 @@ async function analyzeProject(files, options = {}) {
     packageCount: 0,
     wireCount: g.wireRows ? g.wireRows.length : 0,
     totalSeconds: g.totalSeconds,
+    configSeconds: {},
     tt: tt || "",
     loadPercent: tt && tt > 0 ? round((g.totalSeconds / tt) * 100, 1) : null,
     status: g.status,
@@ -1812,7 +2023,17 @@ async function analyzeProject(files, options = {}) {
   const dot = buildStationDotMatrix(stationDetails);
   const pkgByWire = new Map();
   for (const p of packages) for (const w of p.wires) if (!pkgByWire.has(w)) pkgByWire.set(w, p.id);
-  const issues = buildIssues(mergedMbom, ebom, standard, pdf, packages, dot.issues, positionRows);
+  const loopInfo = {
+    total: (Number(loopTimes.singleKit) || 0) + (Number(loopTimes.kitTransferMiddle) || 0) + (Number(loopTimes.kitTransferLast) || 0) + (Number(loopTimes.subLast) || 0),
+    values: {
+      singleKit: Number(loopTimes.singleKit) || 0,
+      kitTransferMiddle: Number(loopTimes.kitTransferMiddle) || 0,
+      kitTransferLast: Number(loopTimes.kitTransferLast) || 0,
+      subLast: Number(loopTimes.subLast) || 0
+    },
+    includeCheck: standardIncludesLoop
+  };
+  const issues = buildIssues(mergedMbom, ebom, standard, pdf, packages, dot.issues, positionRows, loopInfo);
   for (const c of mergedResult.conflicts || []) {
     issues.push({ category: "MBOM真冲突", detail: c.detail });
   }
@@ -1851,9 +2072,10 @@ async function analyzeProject(files, options = {}) {
     });
   }
   if (stationCountNote) {
+    const isBlocked = !stationCount && !autoStations;
     issues.push({
       category: "岗位数提示",
-      detail: stationCountNote + "；岗位数已按节拍自动调整，最终以TT验证为准。"
+      detail: isBlocked ? stationCountNote : stationCountNote + "；岗位数已按节拍自动调整，最终以TT验证为准。"
     });
   }
   const overTtAlloc = stationAllocation.filter((a) => a.loadPercent != null && a.loadPercent > 100);
@@ -1869,14 +2091,20 @@ async function analyzeProject(files, options = {}) {
       detail: `候选岗位数${stationAllocation.length}超过设置的最多预装岗位数${stationCount}：可能因“每个SUB组最多${maxSubFrames || "未设"}个预装”约束或同岗位分组按节拍拆分导致，属候选结果，最终岗位数量须以正式工时、TT和布局验证为准。`
     });
   }
+  const missingTimeSource = packages.some((p) => p.missingTimeSource);
   const plan = {
     regions,
     maxStations: stationCount ?? null,
     maxStationsRequested: maxStations ?? null,
     stationCountNote,
+    overTtPolicy,
+    maxPeoplePerStation: maxPeople,
     autoStations,
     maxSubFrames,
     loopTimes,
+    standardIncludesLoop,
+    loopReserves: reserves,
+    missingTimeSource,
     preassemblyMode,
     modeLabel,
     onlineUltrasonic,
@@ -1893,17 +2121,23 @@ async function analyzeProject(files, options = {}) {
     stationDetails,
     note: "部位、最大岗位数、预装模式、在线超声波、单配置在线超声波限组、在线超声波总组数限制、不可在线SP/SC点、强制线下插接护套、同岗位护套分组用于生成工艺策划参数和候选岗位分配；实际岗位数量仍须由正式工时、TT、布局和工作包验证。"
   };
+  const processFlow = buildProcessFlowAoa(plan);
+  const pfmeaRows = buildPfmeaAoa(stationDetails);
+  const controlPlanRows = buildControlPlanAoa(stationDetails);
 
   return {
     generatedAt: new Date().toISOString(),
-    appVersion: "1.0.0",
+    appVersion: (() => { try { return require("../package.json").version; } catch { return "1.0.25"; } })(),
     knowledgeVersion: "四轮汽车线束后段预装工艺规则 V2.6.1 摘要",
     options: {
       tt: tt ?? null,
       maxStations: stationCount ?? null,
       autoStations,
       maxSubFrames,
+      overTtPolicy,
+      maxPeoplePerStation: maxPeople,
       loopTimes,
+      standardIncludesLoop,
       preassemblyMode,
       modeLabel,
       onlineUltrasonic,
@@ -1917,6 +2151,9 @@ async function analyzeProject(files, options = {}) {
       regions
     },
     plan,
+    processFlow,
+    pfmeaRows,
+    controlPlanRows,
     fileAnalysis,
     validation: validationResult.validation,
     canGenerate: validationResult.canGenerate,
@@ -1939,26 +2176,36 @@ async function analyzeProject(files, options = {}) {
     ebomMaterials: ebom.materials.map((m, i) => ({ idx: i + 1, ...m })),
     standardHours: standard.entries.map((e, i) => ({ idx: i + 1, ...e })),
     housingMatrix,
-    pathRows: wires.map((w) => ({
-      w3: w.w3,
-      w2: w.w2,
-      w1: w.w1,
-      drawingId: w.drawingId,
-      material: w.material,
-      color: w.color,
-      length: w.length,
-      housing1: w.housing1,
-      position1: w.position1,
-      terminal1: w.terminal1,
-      seal1: w.seal1,
-      housing2: w.housing2,
-      position2: w.position2,
-      terminal2: w.terminal2,
-      seal2: w.seal2,
-      configs: w.configCodes.join(" / "),
-      pkgId: pkgByWire.get(w) || "",
-      status: "待唯一责任确认"
-    })),
+    pathRows: wires.map((w) => {
+      const spliceEnds = [w.housing1, w.housing2].filter((h) => isSpliceCode(h)).map(clean).filter(Boolean);
+      return {
+        w3: w.w3,
+        w2: w.w2,
+        w1: w.w1,
+        drawingId: w.drawingId,
+        material: w.material,
+        color: w.color,
+        length: w.length,
+        housing1: w.housing1,
+        position1: w.position1,
+        terminal1: w.terminal1,
+        seal1: w.seal1,
+        housing2: w.housing2,
+        position2: w.position2,
+        terminal2: w.terminal2,
+        seal2: w.seal2,
+        trunk: "【待确认】未从资料读取主干归属",
+        branch: "【待确认】未从资料读取分支归属",
+        branchPoint: "【待确认】未从资料读取分支点",
+        boardSlot: "【待确认】未从资料读取滑板/工装板槽位",
+        protectArea: "【待确认】未从资料读取保护区域",
+        accessoryArea: "【待确认】未从资料读取附件区域",
+        spliceRelation: spliceEnds.length ? spliceEnds.join("、") : "无",
+        configs: w.configCodes.join(" / "),
+        pkgId: pkgByWire.get(w) || "",
+        status: "待唯一责任确认"
+      };
+    }),
     packages: packages.map((p) => ({
       id: p.id,
       kind: p.kind,
@@ -2015,6 +2262,151 @@ function buildGroupTtSheetAoa(plan) {
 
 function overTtModeLabel(plan) {
   return plan && plan.sameStationOverTtMode === "best-rate" ? "按最佳插接率拆分" : "强制同岗（默认）";
+}
+
+// ==================== 受控工艺文件：过程流程图 / PFMEA / 控制计划 / 单工位SOP（V2.6.1 §15/§17） ====================
+function buildProcessFlowAoa(plan) {
+  const stations = (plan && plan.stationDetails) || [];
+  const rows = [["序号", "流程步骤", "输入", "输出（受控中间状态）", "执行岗位/区域", "责任", "状态"]];
+  rows.push([
+    1,
+    "接收前端合格压接线/线组（裁线、剥皮、端子压接已由前端完成并判定合格）",
+    "前端压接线、EBOM物料、标准工时文件",
+    "受控待预装导线（按MBOM/Cutting）",
+    "前端交接区",
+    "前端/物流",
+    "【正式结论】"
+  ]);
+  stations.forEach((st, i) => {
+    rows.push([
+      2 + i,
+      `预装岗位${String(st.stationNo).padStart(2, "0")}：${st.stationName}（插接/布线/保护/传递）`,
+      `工作包：${st.packageIds || "—"}`,
+      "受控半成品：已完成端/待完成端/锁片状态/保护件状态/配置/状态标签",
+      st.stationName,
+      "工艺",
+      st.status
+    ]);
+  });
+  const n = stations.length + 2;
+  rows.push([
+    n,
+    "半成品传递与打圈（KIT/SUB输出岗位）",
+    "受控半成品线束",
+    "按传递路线进入下一预装岗位或最终输出；KIT/SUB输出岗位按规定计打圈（固定50秒/件/岗位）",
+    "KIT/SUB传递路线",
+    "工艺/物流",
+    "【候选方案，待工艺验证】"
+  ]);
+  rows.push([
+    n + 1,
+    "下游工序（电性能测试/外观终检/包装入库）",
+    "完整线束",
+    "测试合格标签/包装",
+    "测试与终检区",
+    "质量",
+    "【候选方案，待工艺验证】"
+  ]);
+  rows.push([
+    n + 2,
+    "说明",
+    "—",
+    "本流程图覆盖后段预装范围；岗位数与顺序为候选，须以正式工时、TT、布局和工作包验证后转正式。",
+    "—",
+    "—",
+    "【候选方案，待工艺验证】"
+  ]);
+  return rows;
+}
+
+const PFMEA_TEMPLATE = [
+  { fail: "错线（导线编号/回路错误）", effect: "回路功能错误，装车故障", cause: "取错导线、看板标识不清", prevent: "按MBOM导线编号取线；看板信息核对；同色线按岗位编码池区分" },
+  { fail: "错孔（孔位插错）", effect: "回路功能错误/端子干涉", cause: "孔位标识不清、插接面方向误判", prevent: "插接前核对目标护套/孔位/方向；二次锁片前复核" },
+  { fail: "退针/未锁止", effect: "端子未锁止，接触不良", cause: "未推入锁止位置、未轻回拉确认", prevent: "平直送入至锁止位置；轻回拉确认；插接后检查" },
+  { fail: "锁片漏装/提前锁止", effect: "端子保持力不足", cause: "未等全部孔位完成即锁二次锁片", prevent: "全部孔位完成并核对后再最终锁止二次锁片" },
+  { fail: "同色线漆点编码错误或重复", effect: "错线/错孔", cause: "编码池重复、打点错误", prevent: "按岗位建立编码池并查重；按标准顺序PK→RD→OG→YE→GN→WH→VT→BK标准化" },
+  { fail: "配置混料", effect: "配置不匹配，批量不良", cause: "多配置物料混放", prevent: "配置标签隔离；按配置核对待插端集合与物料" },
+  { fail: "跨包散线丢失/漏插", effect: "后续工位缺线", cause: "跨工作包受控半成品未标识", prevent: "传递表登记；状态标签；接收核对项（端数/出口方向/孔位责任）" },
+  { fail: "临时拆分/最终重组错误", effect: "拓扑错误", cause: "拆分后未按图重组", prevent: "待重组端编号槽位；最终重组核对" },
+  { fail: "绞线/闭环/穿套/走向错误", effect: "线束尺寸/干涉/EMC问题", cause: "布线顺序不当、长线拖地", prevent: "按布线顺序作业；长线防拖地；专项检查闭环/穿套/交叉/反向" },
+  { fail: "EBOM物料错装/漏装", effect: "保护件/附件缺失", cause: "物料定置不清", prevent: "按岗位物料清单核对名称/规格/数量/配置" },
+  { fail: "测试/标签/包装/追溯错误", effect: "不良流出/追溯失效", cause: "标签缺失、记录错误", prevent: "测试标签、状态标签、追溯记录核对" }
+];
+
+function buildPfmeaAoa(stations) {
+  const rows = [["岗位号", "岗位名称", "工序/作业", "失效模式", "失效影响", "潜在原因", "现行预防", "现行探测", "S", "O", "D", "RPN", "建议措施/责任"]];
+  for (const st of stations || []) {
+    const hasPlug = (st.wireRows || []).some((w) => w.insert1 || w.insert2);
+    for (const t of PFMEA_TEMPLATE) {
+      if (!hasPlug && /错线|错孔|退针|锁片|同色线/.test(t.fail)) continue; // 非插接岗位跳过插接相关失效
+      rows.push([
+        st.stationNo, st.stationName, `预装岗位${st.stationNo}`,
+        t.fail, t.effect, t.cause, t.prevent,
+        "插接后确认/人工核查表",
+        "【待评分】", "【待评分】", "【待评分】", "",
+        `按“${t.prevent}”执行；无企业批准FMEA评分规则时S/O/D待评分`
+      ]);
+    }
+  }
+  if (!stations.length) rows.push(["", "", "未形成岗位（TT/岗位数未设置）", "—", "—", "—", "—", "—", "【待评分】", "【待评分】", "【待评分】", "", "先补齐TT与岗位数"]);
+  return rows;
+}
+
+function buildControlPlanAoa(stations) {
+  const rows = [["岗位号", "岗位名称", "控制项目", "规格/要求", "控制方法", "频次", "记录", "反应计划"]];
+  const items = [
+    ["插接前核对", "产品和配置；MBOM导线编号和回路；完整线色；线径；端子型号和外观；目标护套；目标孔位；护套插接面方向；端子插入方向；漆点颜色和点数（如适用）；当前孔位是否属于本工位", "按MBOM与同色线编码表逐项核对", "每根导线插接前", "岗位自检记录", "发现不符：停止插接，隔离并上报"],
+    ["端子插接", "端子方向正确，平直送入，推入规定锁止位置", "手感/声音/位置确认锁止", "每次插接", "岗位自检记录", "锁止异常：不得反复强插，隔离上报"],
+    ["轻回拉确认", "轻回拉不退出", "插接后轻回拉确认", "每次插接", "岗位自检记录", "退出：重新插接并检查锁止结构"],
+    ["插接后检查", "端子到位；锁止生效；密封件无翻转/脱位/损伤；导线出口方向正确；绝缘/端子/护套无损伤", "目视检查", "每根导线插接后", "岗位自检记录", "异常：隔离返修"],
+    ["二次锁片", "全部规定孔位完成并核对后最终锁止", "核对孔位责任清单后锁止", "每护套一次", "岗位自检记录", "漏装/提前锁止：返工"],
+    ["同色线编码", "同一岗位同一完整线色编码池内编码唯一；标准顺序PK→RD→OG→YE→GN→WH→VT→BK；多色组合按无序集合管理", "按编码表核对漆点颜色/点数", "每根同色线插接前", "编码表", "重复/错误：重新打点并查重"],
+    ["配置核对", "按合法配置核对待插端集合与物料", "配置标签/清单核对", "每件产品开始作业时", "配置记录", "混料：隔离并追溯"],
+    ["跨包散线", "受控半成品导线登记传递表；临时固定不损伤绝缘层/端子/密封件/双绞节距；长线不拖地", "传递表与状态标签核对", "每次跨包传递", "传递记录", "缺失/损伤：停止流转并上报"],
+    ["布线走向", "按布线顺序作业（滑板基准→主干骨架→长线/底层线→由近到远分支→同方向线组→待重组线→配置专属线→外层短引出线→焊点重组/保护→包扎/附件）；无绞线/闭环/穿套/反向/交叉", "专项检查", "每个岗位完成布线后", "检查记录", "异常：拆线重布"],
+    ["临时拆分/最终重组", "待重组端按编号槽位；最终按图重组", "重组核对", "重组后", "重组记录", "重组错误：返工"],
+    ["EBOM物料", "按岗位物料清单核对名称/规格/数量/配置", "清单核对", "每件产品作业前", "物料核对记录", "错装/漏装：停止作业，补料/换料"],
+    ["测试/标签/包装/追溯", "测试合格标签、状态标签、追溯记录完整", "检查标签与记录", "输出时", "追溯记录", "标签缺失：补打并复核"]
+  ];
+  for (const st of stations || []) {
+    const hasPlug = (st.wireRows || []).some((w) => w.insert1 || w.insert2);
+    for (const [item, spec, method, freq, rec, react] of items) {
+      if (!hasPlug && /插接前核对|端子插接|轻回拉|二次锁片|同色线编码/.test(item)) continue;
+      rows.push([st.stationNo, st.stationName, item, spec, method, freq, rec, react]);
+    }
+  }
+  if (!stations.length) rows.push(["", "", "未形成岗位", "—", "—", "—", "—", "先补齐TT与岗位数"]);
+  return rows;
+}
+
+// 单工位SOP骨架（一份SOP只对应一个工位；嵌入岗位表/核查表各岗位工作表头部）
+function buildSopBlockAoa(st, plan) {
+  const hasPlug = (st.wireRows || []).some((w) => w.insert1 || w.insert2);
+  const rows = [];
+  rows.push(["【单工位SOP】", st.stationName]);
+  rows.push(["岗位号", st.stationNo]);
+  rows.push(["制作部位", st.region]);
+  rows.push(["预装模式", st.modeLabel]);
+  rows.push(["作业对象", "前端已完成且判定合格的压接线/线组及前一预装岗位受控输出的半成品"]);
+  rows.push(["输入", `工作包：${st.packageIds || "—"}；物料：见下方“本岗位相关EBOM物料”`]);
+  rows.push(["输出（受控状态）", "已完成端/待完成端/锁片状态/保护件状态/配置/状态标签（受控半成品导线/线束）"]);
+  if (hasPlug) {
+    rows.push(["作业步骤", "① 插接前核对：产品和配置；MBOM导线编号和回路；完整线色；线径；端子型号和外观；目标护套；目标孔位；护套插接面方向；端子插入方向；漆点颜色和点数（如适用）；当前孔位是否属于本工位。"]);
+    rows.push(["", "② 插接动作：识别目标孔位 → 确认端子方向 → 平直送入 → 推入规定锁止位置 → 手感/声音/位置确认锁止 → 轻回拉确认 → 检查端子未退出/歪斜/卡滞。"]);
+    rows.push(["", "③ 插接后确认：端子到位；锁止生效；轻回拉不退出；密封件未翻转/脱位/损伤；导线出口方向符合要求；绝缘层/端子/护套无可见损伤；同色线导线编号、漆点编码与目标孔位一致。"]);
+    rows.push(["", "④ 二次锁片：只能在全部规定孔位完成并核对后最终锁止。"]);
+    rows.push(["禁止事项", "不得强行插入方向不明的端子；不得扭转/折弯/斜向插入；不得拉拽导线代替端子送入；不得使用未经批准工具强压端子；不得对卡滞端子反复强插；不得在孔位责任或数据不明时继续插接。"]);
+  } else {
+    rows.push(["作业步骤", "按布线顺序作业：滑板基准→主干骨架→长线/底层线→由近到远分支→同方向线组→待重组线→配置专属线→外层短引出线→焊点重组/保护→包扎/附件（具体顺序以图纸/工装验证为准）。"]);
+    rows.push(["防错要求", "长导线不得拖地；临时固定不得损伤绝缘层、端子、密封件或双绞节距；跨包导线登记传递表并挂状态标签。"]);
+  }
+  rows.push(["防错要求", hasPlug
+    ? "按本岗位同色线编码表核对漆点；孔位责任唯一；配置核对；接收核对待插端计数、出口方向、孔位责任和状态标签。"
+    : "跨包散线接收核对：端数、出口方向、孔位责任、状态标签。"]);
+  rows.push(["物料与工时", `各配置工时：${Object.entries(st.configTime || {}).map(([c, s]) => `${c}:${s}s`).join("；") || "无"}；打圈工时：${st.loopTimeSeconds || 0}s`]);
+  rows.push(["状态", st.status]);
+  rows.push([]);
+  return rows;
 }
 
 // ==================== 整体预装插接率（按配置） ====================
@@ -2149,6 +2541,11 @@ function buildProcessWorkbook(result) {
 
   addSheet(wb, "同岗位分组节拍处理", buildGroupTtSheetAoa(plan));
 
+  // V2.6.1 受控工艺文件：过程流程图 / PFMEA / 控制计划
+  addSheet(wb, "过程流程图", buildProcessFlowAoa(plan));
+  addSheet(wb, "PFMEA", buildPfmeaAoa(stations));
+  addSheet(wb, "控制计划", buildControlPlanAoa(stations));
+
   for (const st of stations) {
     const aoa = [];
     aoa.push(["岗位号", st.stationNo]);
@@ -2165,8 +2562,12 @@ function buildProcessWorkbook(result) {
     for (const [cfg, sec] of Object.entries(st.configTime || {})) {
       aoa.push([`岗位估算工时-配置 ${cfg}(秒)`, sec]);
     }
+    aoa.push(["打圈工时(秒)", st.loopTimeSeconds || 0]);
+    aoa.push(["建议人数", st.workerCount || 1]);
+    aoa.push(["负荷率(%)", st.loadPercent != null ? st.loadPercent : ""]);
     aoa.push(["状态", st.status]);
-    aoa.push([]);
+    // 单工位SOP骨架（一份SOP只对应一个工位）
+    aoa.push(...buildSopBlockAoa(st, plan));
     aoa.push(["本岗位相关EBOM物料"]);
     aoa.push(["材料名称", "Description", "图纸号", "捷翼号", "厂家号", "厂家", "图纸用量", "工艺余量", "总用量", "单位", "备注"]);
     if (st.materials && st.materials.length) {
@@ -2294,6 +2695,10 @@ function buildReviewWorkbook(result) {
 
   addSheet(wb, "同岗位分组节拍处理", buildGroupTtSheetAoa(plan));
 
+  addSheet(wb, "过程流程图", buildProcessFlowAoa(plan));
+  addSheet(wb, "PFMEA", buildPfmeaAoa(stations));
+  addSheet(wb, "控制计划", buildControlPlanAoa(stations));
+
   for (const st of stations) {
     const aoa = [];
     aoa.push(["岗位号", st.stationNo]);
@@ -2309,6 +2714,10 @@ function buildReviewWorkbook(result) {
     for (const [cfg, sec] of Object.entries(st.configTime || {})) {
       aoa.push([`岗位估算工时-配置 ${cfg}(秒)`, sec]);
     }
+    aoa.push(["打圈工时(秒)", st.loopTimeSeconds || 0]);
+    aoa.push(["建议人数", st.workerCount || 1]);
+    aoa.push(["负荷率(%)", st.loadPercent != null ? st.loadPercent : ""]);
+    aoa.push(["状态", st.status]);
     aoa.push(["胶带包胶备注", st.tapeRemark]);
     aoa.push([]);
     aoa.push(["物料信息"]);
@@ -2382,11 +2791,20 @@ function buildWorkbook(result) {
     ["不能在线SP/SC压接点", (result.plan && result.plan.noOnlineUltrasonicSplices || []).join("、")],
     ["强制线下插接护套", (result.plan && result.plan.forcedOfflineHousings || []).join("、")],
     ["组超节拍处理方式", overTtModeLabel(result.plan)],
+    ["超节拍处理", (result.plan && result.plan.overTtPolicy === "allow") ? "可超节拍（多人合干）" : "禁止超节拍（默认）"],
+    ["单岗位最多人数", (result.plan && result.plan.maxPeoplePerStation) || "2"],
+    ["打圈工时(秒/岗位)", ((result.plan && result.plan.loopTimes) || {}) ? `单KIT:${(result.plan.loopTimes.singleKit) || 0}；KIT传递中间:${(result.plan.loopTimes.kitTransferMiddle) || 0}；KIT传递末:${(result.plan.loopTimes.kitTransferLast) || 0}；SUB末:${(result.plan.loopTimes.subLast) || 0}` : ""],
+    ["标准工时已含打圈", (result.plan && result.plan.standardIncludesLoop) ? "是（不重复计入）" : "否（按固定值计入）"],
+    ["工时源完整", (result.plan && result.plan.missingTimeSource) ? "否（存在【未找到工时源】动作，TT/岗位数为候选估算）" : "是"],
     ["TT(秒)", (result.options && result.options.tt) ?? ""],
     ["说明", (result.plan && result.plan.note) || ""]
   ]);
 
   addSheet(wb, "同岗位分组节拍处理", buildGroupTtSheetAoa(result.plan));
+
+  addSheet(wb, "过程流程图", buildProcessFlowAoa(result.plan));
+  addSheet(wb, "PFMEA", buildPfmeaAoa((result.plan && result.plan.stationDetails) || []));
+  addSheet(wb, "控制计划", buildControlPlanAoa((result.plan && result.plan.stationDetails) || []));
 
   addSheet(wb, "文件分析结果", [
     ["指标", "值"],
@@ -2404,8 +2822,8 @@ function buildWorkbook(result) {
   ]);
 
   addSheet(wb, "候选岗位分配", [
-    ["岗位号", "预装模式", "包含工作包", "工作包数", "导线数", "估算工时(秒)", "TT(秒)", "负荷率%", "配置", "状态"],
-    ...((result.plan && result.plan.stationAllocation) || []).map((r) => [r.stationNo, r.modeLabel, r.packageIds, r.packageCount, r.wireCount, r.totalSeconds, r.tt, r.loadPercent, r.configs, r.status])
+    ["岗位号", "预装模式", "包含工作包", "工作包数", "导线数", "估算工时(秒)", "各配置工时(秒)", "TT(秒)", "负荷率%", "配置", "状态"],
+    ...((result.plan && result.plan.stationAllocation) || []).map((r) => [r.stationNo, r.modeLabel, r.packageIds, r.packageCount, r.wireCount, r.totalSeconds, Object.entries(r.configSeconds || {}).map(([c, s]) => `${c}:${s}s`).join("；"), r.tt, r.loadPercent, r.configs, r.status])
   ]);
 
   addSheet(wb, "MBOM导线表", [
@@ -2424,13 +2842,13 @@ function buildWorkbook(result) {
   ]);
 
   addSheet(wb, "导线完整路径表", [
-    ["W3", "W2", "W1", "图纸号", "材料", "颜色", "长度", "护套1", "孔位1", "端子1", "雨塞1", "护套2", "孔位2", "端子2", "雨塞2", "配置", "候选包", "状态"],
-    ...result.pathRows.map((r) => [r.w3, r.w2, r.w1, r.drawingId, r.material, r.color, r.length, r.housing1, r.position1, r.terminal1, r.seal1, r.housing2, r.position2, r.terminal2, r.seal2, r.configs, r.pkgId, r.status])
+    ["W3", "W2", "W1", "图纸号", "材料", "颜色", "长度", "护套1", "孔位1", "端子1", "雨塞1", "护套2", "孔位2", "端子2", "雨塞2", "焊点关系", "主干", "分支", "分支点", "滑板/工装板槽位", "保护区域", "附件区域", "配置", "候选包", "状态"],
+    ...result.pathRows.map((r) => [r.w3, r.w2, r.w1, r.drawingId, r.material, r.color, r.length, r.housing1, r.position1, r.terminal1, r.seal1, r.housing2, r.position2, r.terminal2, r.seal2, r.spliceRelation, r.trunk, r.branch, r.branchPoint, r.boardSlot, r.protectArea, r.accessoryArea, r.configs, r.pkgId, r.status])
   ]);
 
   addSheet(wb, "护套关联矩阵", [
-    ["起始护套", "目标护套", "关联导线数", "导线编号", "配置"],
-    ...result.housingMatrix.map((r) => [r.housingA, r.housingB, r.count, r.wires, r.configs])
+    ["起始护套", "目标护套", "关联导线数(并集)", "各配置关联数(Nij)", "最强/次强关联", "导线编号", "候选工作包", "配置", "状态"],
+    ...result.housingMatrix.map((r) => [r.housingA, r.housingB, r.count, r.perConfig, r.strength, r.wires, r.pkgIds, r.configs, r.status])
   ]);
 
   addSheet(wb, "候选预装工作包", [
@@ -2484,7 +2902,8 @@ async function analyzeFilesForPreview(files, options = {}) {
     uniqueW1: new Set(specialResult.wires.map((w) => w.w1).filter(Boolean)).size
   };
   const analysis = buildFileAnalysis(mergedMbom);
-  // 按“最高配置工时 ÷ TT”测算预计岗位数（用于前端占位提示；与正式生成口径一致）
+  // 按“最高配置工时 ÷ 每岗位承载容量”测算预计岗位数（与正式生成口径一致：
+  // 容量=TT×人数-该类型打圈预留；禁止超节拍时人数=1）
   const tt = options.tt != null ? Number(options.tt) : null;
   let estimatedStations = null;
   let maxConfigSeconds = null;
@@ -2500,7 +2919,24 @@ async function analyzeFilesForPreview(files, options = {}) {
     }
     const vals = Object.values(configTotals).filter((v) => v > 0);
     maxConfigSeconds = vals.length ? Math.max(...vals) : null;
-    estimatedStations = maxConfigSeconds ? Math.ceil(maxConfigSeconds / tt) : null;
+    const loopTimes = { ...(options.loopTimes || {}) };
+    const standardIncludesLoop = options.standardIncludesLoop === true || options.standardIncludesLoop === "true" || options.standardIncludesLoop === "yes";
+    if (standardIncludesLoop) {
+      loopTimes.singleKit = 0;
+      loopTimes.kitTransferMiddle = 0;
+      loopTimes.kitTransferLast = 0;
+      loopTimes.subLast = 0;
+    }
+    const overTtPolicy = options.overTtPolicy === "allow" ? "allow" : "forbid";
+    const maxPeople = (Number(options.maxPeoplePerStation) >= 1) ? Math.floor(Number(options.maxPeoplePerStation)) : 2;
+    const reserves = loopReserves(loopTimes, options.preassemblyMode || "");
+    const peopleFactor = overTtPolicy === "allow" ? maxPeople : 1;
+    const capKit = Math.max(1, tt * peopleFactor - reserves.kit);
+    const capSub = Math.max(1, tt * peopleFactor - reserves.sub);
+    const hasSubType = ["pure-sub", "sub-kit", "sub-kit-transfer"].includes(options.preassemblyMode || "");
+    const hasKitType = (options.preassemblyMode || "") !== "pure-sub";
+    const cap = hasSubType && hasKitType ? Math.min(capKit, capSub) : (hasSubType ? capSub : capKit);
+    estimatedStations = maxConfigSeconds ? Math.ceil(maxConfigSeconds / cap) : null;
   }
   return {
     ...analysis,

@@ -237,6 +237,133 @@ async function checkUpdate() {
   }
 }
 
+// ==================== 启动自动检查更新弹窗（稍后 / 现在更新） ====================
+async function autoUpdatePrompt() {
+  try {
+    if (sessionStorage.getItem("dsh_updatePromptShown")) return;
+    sessionStorage.setItem("dsh_updatePromptShown", "1");
+    const resp = await fetch("/api/update/check");
+    const d = await resp.json();
+    if (!d || !d.hasUpdate || !d.configured) return;
+    const overlay = document.createElement("div");
+    overlay.className = "req-modal-overlay";
+    const box = document.createElement("div");
+    box.className = "req-modal";
+    const h = document.createElement("h3");
+    h.textContent = "发现新版本";
+    const b = document.createElement("div");
+    b.style = "line-height:1.7; color:var(--text-2); font-size:13px;";
+    b.innerHTML = `当前版本 <strong>${escapeHtml(d.current)}</strong> → 最新版本 <strong>${escapeHtml(d.latest)}</strong>`;
+    if (d.notes) b.innerHTML += `<div style="margin-top:6px">更新说明：${escapeHtml(d.notes)}</div>`;
+    const row = document.createElement("div");
+    row.style = "margin-top:14px; display:flex; gap:10px;";
+    const btnLater = document.createElement("button");
+    btnLater.className = "btn"; btnLater.type = "button"; btnLater.textContent = "稍后";
+    const btnNow = document.createElement("button");
+    btnNow.className = "btn primary"; btnNow.type = "button"; btnNow.textContent = "现在更新";
+    row.appendChild(btnLater); row.appendChild(btnNow);
+    b.appendChild(row);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+    btnLater.addEventListener("click", () => overlay.remove());
+    btnNow.addEventListener("click", async () => {
+      try {
+        btnNow.disabled = true; btnNow.textContent = "正在下载…";
+        const r = await fetch("/api/update/download", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ downloadUrl: d.downloadUrl, sha256: d.sha256 || "", targetVersion: d.latest })
+        });
+        const data = await r.json();
+        overlay.remove();
+        showMessageModal("更新", data.ok ? (data.message + "（重启软件后方可生效）") : (data.error || "下载更新失败"));
+      } catch (e2) {
+        overlay.remove();
+        showMessageModal("更新", "下载更新失败：" + escapeHtml(e2 && e2.message ? e2.message : e2));
+      }
+    });
+    box.appendChild(h); box.appendChild(b);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+  } catch {}
+}
+
+// ==================== 本地生成历史 ====================
+function timeText(iso) {
+  try {
+    const d = new Date(iso);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  } catch { return iso || ""; }
+}
+async function fetchGenHistory() {
+  const resp = await fetch("/api/gen-history");
+  const data = await resp.json();
+  return (data && data.entries) || [];
+}
+function renderHistoryModal() {
+  const overlay = document.createElement("div");
+  overlay.className = "req-modal-overlay";
+  const box = document.createElement("div");
+  box.className = "req-modal";
+  box.style = "width:min(860px,92vw); max-height:86vh; overflow:auto;";
+  const h = document.createElement("h3");
+  h.textContent = "本地生成历史（本机data\\gen_history）";
+  const tip = document.createElement("p");
+  tip.style = "color:var(--text-3); font-size:12px; line-height:1.6;";
+  tip.textContent = "每次“开始解析生成”自动保存上传文件与生成结果，可按时间倒序打开重看/重新导出。此记录在软件目录下，与“版本记录”分开，本地生成不写入版本历史。";
+  const listWrap = document.createElement("div");
+  listWrap.style = "margin-top:12px;";
+  const btns = document.createElement("div");
+  btns.style = "margin-top:16px;";
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "btn primary"; closeBtn.type = "button"; closeBtn.textContent = "关闭";
+  closeBtn.addEventListener("click", () => overlay.remove());
+  btns.appendChild(closeBtn);
+  box.appendChild(h); box.appendChild(tip); box.appendChild(listWrap); box.appendChild(btns);
+  overlay.appendChild(box);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+  listWrap.innerHTML = '<div style="color:var(--text-3);padding:8px;">加载中…</div>';
+  fetchGenHistory().then((entries) => {
+    if (!entries.length) {
+      listWrap.innerHTML = '<div style="color:var(--text-3);padding:8px;">暂无生成历史。</div>';
+      return;
+    }
+    const rows = entries.map((e) => {
+      const fileText = Object.entries(e.fileNames || {}).map(([k, n]) => `${k}:${n}`).join("；");
+      return `<div style="border-bottom:1px solid var(--border); padding:9px 4px; display:flex; align-items:flex-start; gap:10px;">
+        <div style="flex:1; min-width:0;">
+          <div><strong>${escapeHtml(timeText(e.time))}</strong> ｜ 部位：${escapeHtml(e.regions || "未选择")} ｜ 模式：${escapeHtml(e.modeLabel || "")}</div>
+          <div style="font-size:12px; color:var(--text-2); margin-top:2px;">岗位 ${e.stations || 0} ｜ 导线 ${e.wires || 0} ｜ 工作包 ${e.packages || 0} ｜ 待确认/冲突 ${e.issues || 0} ｜ TT ${e.tt || "—"}${e.missingTimeSource ? " ｜【未找到工时源】" : ""}</div>
+          ${fileText ? `<div style="font-size:12px; color:var(--text-3); margin-top:2px;">文件：${escapeHtml(fileText)}</div>` : ""}
+        </div>
+        <button class="btn" type="button" data-open="${e.id}">打开</button>
+        <button class="btn" type="button" data-del="${e.id}">删除</button>
+      </div>`;
+    }).join("");
+    listWrap.innerHTML = rows;
+    listWrap.querySelectorAll("[data-open]").forEach((btn) => btn.addEventListener("click", () => { openGenHistory(btn.dataset.open); overlay.remove(); }));
+    listWrap.querySelectorAll("[data-del]").forEach((btn) => btn.addEventListener("click", async () => {
+      if (!confirm("确定删除该条生成历史吗？（本机原始项目文件不受影响）")) return;
+      try { await fetch("/api/gen-history/" + btn.dataset.del, { method: "DELETE" }); renderHistoryModal(); } catch {}
+    }));
+  }).catch((err) => { listWrap.innerHTML = '<div class="validation-error">读取失败：' + escapeHtml(err.message || err) + '</div>'; });
+}
+async function openGenHistory(id) {
+  try {
+    const resp = await fetch("/api/gen-history/" + id);
+    if (!resp.ok) throw new Error("打开失败");
+    const data = await resp.json();
+    result = data.result;
+    activeTab = "";
+    renderResult();
+    window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+    toast("已从生成历史打开该次生成结果，可查看或导出。");
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
 function bindFileCards() {
   document.querySelectorAll(".file-drop").forEach((card) => {
     const field = card.dataset.field;
@@ -367,6 +494,19 @@ function buildAnalysisFd() {
   return fd;
 }
 
+// 统一的工艺策划参数表单字段（供“分析文件”与“开始解析生成”共用，保证预览与正式生成口径一致）
+function appendAnalysisOptions(fd) {
+  fd.append("tt", $("#tt").value || "");
+  fd.append("preassemblyMode", $("#preassemblyMode").value || "");
+  fd.append("overTtPolicy", (document.querySelector('input[name="overTtPolicy"]:checked') || {}).value || "forbid");
+  fd.append("maxPeoplePerStation", $("#maxPeoplePerStation").value || "2");
+  fd.append("loopSingleKit", $("#loopSingleKit").value || "");
+  fd.append("loopKitTransferMiddle", $("#loopKitTransferMiddle").value || "");
+  fd.append("loopKitTransferLast", $("#loopKitTransferLast").value || "");
+  fd.append("loopSubLast", $("#loopSubLast").value || "");
+  fd.append("standardIncludesLoop", ($("#loopIncludeCheck") && $("#loopIncludeCheck").checked) ? "true" : "false");
+}
+
 async function analyzeFiles() {
   if (!files.mbom) {
     toast("请先上传MBOM/Cutting文件。", "error");
@@ -380,7 +520,7 @@ async function analyzeFiles() {
   try {
     const resp = await fetch("/api/analyze-files", { method: "POST", body: (() => {
       const fd = buildAnalysisFd();
-      fd.append("tt", $("#tt").value || "");
+      appendAnalysisOptions(fd);
       return fd;
     })() });
     const data = await resp.json();
@@ -446,7 +586,7 @@ function renderFileAnalysis() {
     ["护套数量", a.housingCount + " 个"],
     ["SP/SC压接点", a.spliceCount + " 个"],
     ["配置数量", (a.configs || []).length + " 个"],
-    ["预计岗位数(按最高配置工时÷TT)", a.estimatedStations ? `${a.estimatedStations} 个` : ((a.tt ? "（TT未算）" : "需填写TT") + (a.maxConfigSeconds ? ` / 最高配置${a.maxConfigSeconds}s` : ""))],
+    ["预计岗位数(按最高配置工时÷每岗承载容量)", a.estimatedStations ? `${a.estimatedStations} 个` : ((a.tt ? "（TT未算）" : "需填写TT") + (a.maxConfigSeconds ? ` / 最高配置${a.maxConfigSeconds}s` : ""))],
     ["单配置压接点数量", groupText]
   ].map(([k, v]) => `<div class="analysis-card"><div class="label">${k}</div><div class="value">${v}</div></div>`).join("");
 
@@ -512,12 +652,11 @@ async function analyze() {
   }
 
   const fd = buildAnalysisFd();
-  fd.append("tt", $("#tt").value || "");
+  appendAnalysisOptions(fd);
   const regionChecked = document.querySelector('input[name="region"]:checked');
   if (regionChecked) fd.append("regions", regionChecked.value);
   fd.append("maxStations", maxStationsVal);
   fd.append("autoStations", autoStations ? "true" : "false");
-  fd.append("preassemblyMode", $("#preassemblyMode").value || "");
   fd.append("onlineUltrasonic", $("#onlineUltrasonic").value || "no");
   fd.append("onlineUltrasonicMaxGroupsPerConfig", $("#onlineUltrasonicMaxGroupsPerConfig").value || "");
   fd.append("onlineUltrasonicMaxTotalGroups", $("#onlineUltrasonicMaxTotalGroups").value || "");
@@ -525,10 +664,6 @@ async function analyze() {
   fd.append("forcedOfflineHousings", $("#forcedOfflineHousings").value || "");
   fd.append("sameStationGroups", JSON.stringify(collectSameStationGroups()));
   fd.append("sameStationOverTtMode", (document.querySelector('input[name="sameStationOverTtMode"]:checked') || {}).value || "force-same");
-  fd.append("loopSingleKit", $("#loopSingleKit").value || "");
-  fd.append("loopKitTransferMiddle", $("#loopKitTransferMiddle").value || "");
-  fd.append("loopKitTransferLast", $("#loopKitTransferLast").value || "");
-  fd.append("loopSubLast", $("#loopSubLast").value || "");
   fd.append("maxSubFrames", $("#maxSubFrames").value || "");
   fd.append("grommetStations", JSON.stringify(collectGrommetRows()));
 
@@ -596,6 +731,11 @@ function defineTabs() {
       ["不能在线SP/SC压接点", (plan.noOnlineUltrasonicSplices || []).join("、") || "无"],
       ["强制线下插接护套", (plan.forcedOfflineHousings || []).join("、") || "无"],
       ["组超节拍处理方式", plan.sameStationOverTtMode === "best-rate" ? "按最佳插接率拆分" : "强制同岗（默认）"],
+      ["超节拍处理", plan.overTtPolicy === "allow" ? "可超节拍（多人合干）" : "禁止超节拍（默认）"],
+      ["单岗位最多人数", plan.maxPeoplePerStation || "2"],
+      ["打圈工时(秒/岗位)", `单KIT:${(plan.loopTimes && plan.loopTimes.singleKit) || 0}；KIT传递中间:${(plan.loopTimes && plan.loopTimes.kitTransferMiddle) || 0}；KIT传递末:${(plan.loopTimes && plan.loopTimes.kitTransferLast) || 0}；SUB末:${(plan.loopTimes && plan.loopTimes.subLast) || 0}`],
+      ["标准工时已含打圈", plan.standardIncludesLoop ? "是（不重复计50秒）" : "否（按固定值计入）"],
+      ["工时源完整", plan.missingTimeSource ? "否（存在【未找到工时源】动作，TT/岗位数为候选估算）" : "是"],
       ["同岗位护套分组", (plan.sameStationGroups || []).map(g => {
         const ml = ({ "pure-kit": "纯KIT岗位", "kit-transfer": "KIT传递岗", "sub": "SUB岗位" })[g.mode] || g.mode || "纯KIT岗位";
         return `${g.name || "同岗组"}[${ml}](${g.housings})`;
@@ -609,15 +749,18 @@ function defineTabs() {
       headers: ["序号", "组名", "护套", "岗位类型", "合并工时(秒)", "TT(秒)", "负荷率%", "处理方式", "结果", "拆分情况/说明", "状态"],
       rows: plan.groupTtRows.map(r => [r.idx, r.groupName, r.housings, r.modeLabel, r.mergedSeconds, r.tt, r.loadPercent, r.handleMode, r.outcome, r.splitDetail, r.status])
     }] : []),
-    { id: "stations", label: "候选岗位分配", headers: ["岗位号", "预装模式", "包含工作包", "工作包数", "导线数", "估算工时(秒)", "TT(秒)", "负荷率%", "配置", "状态"], rows: (plan.stationAllocation || []).map(r => [r.stationNo, r.modeLabel, r.packageIds, r.packageCount, r.wireCount, r.totalSeconds, r.tt, r.loadPercent, r.configs, r.status]) },
-    { id: "stationDetails", label: "岗位明细", headers: ["岗位号", "岗位名称", "制作部位", "预装模式", "导线数", "估算工时(秒)", "胶带包胶备注", "状态"], rows: (plan.stationDetails || []).map(r => [r.stationNo, r.stationName, r.region, r.modeLabel, r.wireRows.length, r.totalSeconds, r.tapeRemark, r.status]) },
+    { id: "stations", label: "候选岗位分配", headers: ["岗位号", "预装模式", "包含工作包", "工作包数", "导线数", "估算工时(秒)", "各配置工时(秒)", "TT(秒)", "负荷率%", "配置", "状态"], rows: (plan.stationAllocation || []).map(r => [r.stationNo, r.modeLabel, r.packageIds, r.packageCount, r.wireCount, r.totalSeconds, Object.entries(r.configSeconds || {}).map(([c, s]) => `${c}:${s}s`).join("；"), r.tt, r.loadPercent, r.configs, r.status]) },
+    { id: "stationDetails", label: "岗位明细", headers: ["岗位号", "岗位名称", "制作部位", "预装模式", "导线数", "估算工时(秒)", "负荷率%", "打圈(秒)", "建议人数", "各配置工时(秒)", "胶带包胶备注", "状态"], rows: (plan.stationDetails || []).map(r => [r.stationNo, r.stationName, r.region, r.modeLabel, (r.wireRows || []).length, r.totalSeconds, r.loadPercent != null ? r.loadPercent : "", r.loopTimeSeconds || 0, r.workerCount || 1, Object.entries(r.configTime || {}).map(([c, s]) => `${c}:${s}s`).join("；"), r.tapeRemark, r.status]) },
+    { id: "processFlow", label: "过程流程图", headers: (result.processFlow || [])[0] || [], rows: (result.processFlow || []).slice(1) },
+    { id: "pfmea", label: "PFMEA", headers: (result.pfmeaRows || [])[0] || [], rows: (result.pfmeaRows || []).slice(1) },
+    { id: "controlPlan", label: "控制计划", headers: (result.controlPlanRows || [])[0] || [], rows: (result.controlPlanRows || []).slice(1) },
     { id: "ledger", label: "输入台账", headers: ["文件类型", "文件名称", "大小KB", "读取状态", "简要信息"], rows: result.ledger.map(r => [r.fileType, r.fileName, r.sizeKB, r.status, r.info]) },
     { id: "issues", label: "冲突与待确认", headers: ["序号", "类别", "说明"], rows: result.issues.map((r, i) => [i + 1, r.category, r.detail]) },
     { id: "wires", label: "MBOM导线表", headers: ["序号", "W3看板号", "W2看板号", "W1看板号", "材料名称", "图纸号", "客户号", "规格", "颜色", "下料长度", "单位", "端子1", "雨塞1", "端子2", "雨塞2", "护套1", "孔位1", "护套2", "孔位2", "配置", "状态"], rows: result.wires.map(r => [r.idx, r.w3, r.w2, r.w1, r.material, r.drawingId, r.customerNo, r.spec, r.color, r.length, r.unit, r.terminal1, r.seal1, r.terminal2, r.seal2, r.housing1, r.position1, r.housing2, r.position2, r.configs, r.status]) },
     { id: "ebom", label: "EBOM物料表", headers: ["序号", "模块号", "模块名称", "材料名称", "Description", "图纸号", "捷翼号", "厂家号", "厂家", "图纸用量", "工艺余量", "总用量", "单位", "单价", "价格汇总", "理论铜重", "备注"], rows: result.ebomMaterials.map(r => [r.idx, r.moduleNo, r.moduleName, r.materialName, r.description, r.drawingId, r.jettyNo, r.spn, r.supplier, r.designQty, r.processAllowance, r.totalQty, r.unit, r.unitPrice, r.totalPrice, r.copperWeight, r.notes]) },
     { id: "standard", label: "标准工时表", headers: ["序号", "工序", "工作要素", "描述", "动作开始", "动作结束", "标准工时", "单位"], rows: result.standardHours.map(r => [r.idx, r.process, r.activity, r.comments, r.clockStart, r.clockStop, r.time, r.unit]) },
-    { id: "path", label: "导线完整路径", headers: ["W3", "W2", "W1", "图纸号", "材料", "颜色", "长度", "护套1", "孔位1", "端子1", "雨塞1", "护套2", "孔位2", "端子2", "雨塞2", "配置", "候选包", "状态"], rows: result.pathRows.map(r => [r.w3, r.w2, r.w1, r.drawingId, r.material, r.color, r.length, r.housing1, r.position1, r.terminal1, r.seal1, r.housing2, r.position2, r.terminal2, r.seal2, r.configs, r.pkgId, r.status]) },
-    { id: "matrix", label: "护套关联矩阵", headers: ["起始护套", "目标护套", "关联导线数", "导线编号", "配置"], rows: result.housingMatrix.map(r => [r.housingA, r.housingB, r.count, r.wires, r.configs]) },
+    { id: "path", label: "导线完整路径", headers: ["W3", "W2", "W1", "图纸号", "材料", "颜色", "长度", "护套1", "孔位1", "端子1", "雨塞1", "护套2", "孔位2", "端子2", "雨塞2", "焊点关系", "主干", "分支", "分支点", "滑板/工装板槽位", "保护区域", "附件区域", "配置", "候选包", "状态"], rows: result.pathRows.map(r => [r.w3, r.w2, r.w1, r.drawingId, r.material, r.color, r.length, r.housing1, r.position1, r.terminal1, r.seal1, r.housing2, r.position2, r.terminal2, r.seal2, r.spliceRelation, r.trunk, r.branch, r.branchPoint, r.boardSlot, r.protectArea, r.accessoryArea, r.configs, r.pkgId, r.status]) },
+    { id: "matrix", label: "护套关联矩阵", headers: ["起始护套", "目标护套", "关联导线数(并集)", "各配置关联数(Nij)", "最强/次强关联", "导线编号", "候选工作包", "配置", "状态"], rows: result.housingMatrix.map(r => [r.housingA, r.housingB, r.count, r.perConfig, r.strength, r.wires, r.pkgIds, r.configs, r.status]) },
     { id: "packages", label: "候选预装工作包", headers: ["工作包编号", "层级", "名称/看板号", "导线数", "总长度", "最长导线", "包含护套", "锚点", "配置", "路线候选", "估算工时(秒)", "状态"], rows: result.packages.map(r => [r.id, r.kind, r.name, r.wireCount, r.totalLength, r.maxLength, r.housings, r.anchor, r.configs, r.routeType, r.estimatedSeconds, r.status]) },
     { id: "positions", label: "孔位责任矩阵", headers: ["工作包", "护套", "孔位", "导线", "端子", "雨塞", "配置", "状态"], rows: result.positionRows.map(r => [r.pkgId, r.housing, r.position, r.wire, r.terminal, r.seal, r.configs, r.status]) },
     { id: "dots", label: "同色线编码", headers: ["工作包", "导线颜色", "导线", "目标护套/孔位", "配置", "标准化编码", "查重", "状态"], rows: result.dotRows.map(r => [r.pkgId, r.wireColor, r.wireId, r.target, r.config, r.standardCode, r.checkResult, r.status]) },
@@ -940,9 +1083,12 @@ function init() {
   });
   $("#clearAllFiles").addEventListener("click", clearAllUploadedFiles);
   $("#checkUpdateBtn").addEventListener("click", checkUpdate);
+  $("#genHistoryBtn").addEventListener("click", renderHistoryModal);
   document.querySelectorAll("[data-template]").forEach(btn => {
     btn.addEventListener("click", () => downloadTemplate(btn.dataset.template));
   });
+  // 启动时自动检查更新（有新版则弹“稍后/现在更新”）
+  autoUpdatePrompt();
 }
 
 init();
