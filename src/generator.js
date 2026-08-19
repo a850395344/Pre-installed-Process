@@ -461,37 +461,62 @@ function buildHousingMatrix(wires, packages) {
   return rows.sort((a, b) => b.count - a.count || a.housingA.localeCompare(b.housingA));
 }
 
-function buildPackages(wires, configs, entries) {
-  const groups = new Map();
-  for (const w of wires) {
-    const key = w.w3 || w.w2 || "W1:" + (w.w1 || w.drawingId);
-    if (!groups.has(key)) {
-      groups.set(key, {
-        key,
-        kind: w.w3 ? "W3" : w.w2 ? "W2" : "W1直挂",
-        name: w.w3 || w.w2 || w.w1 || w.drawingId,
-        wires: []
-      });
-    }
-    groups.get(key).wires.push(w);
-  }
+// ==================== 拆分预装工艺：看板分组 + W1直挂按“护套关联 + 工时封顶”聚合（V2.6.1 §7）
+// W1直挂（无 W3/W2 看板）的导线不再各自成包，而是按“护套相同”聚成一组，并按“这一组活的合计工时”
+// 达到一档目标工作量即收口——这样单线/压接线/双绞线按各自真实工时参与分组，而不是按根数分。
+// 每个聚合包仍标【候选方案，待工艺验证】，可再由护套关联、TT、现场验证闭环。
 
-  const packages = [];
-  let seq = 0;
-  for (const group of groups.values()) {
-    seq += 1;
-    const ws = group.wires;
+// 单根导线的“工作分量”：取线/布线 + 两端插接（含双绞/屏蔽插接补偿等）。压在压接线/双绞线等不同线型上，
+// 各自按其标准工时计算，故天然按工作量大块归类。
+function computeWireEffort(w, entries) {
+  const rt = getRouteStandardTimes(entries, w);
+  const special = isSpecialWire(w);
+  const h1Real = clean(w.housing1) && clean(w.housing1) !== "-" && !isSpliceCode(w.housing1);
+  const h2Real = clean(w.housing2) && clean(w.housing2) !== "-" && !isSpliceCode(w.housing2);
+  const plug1 = h1Real ? getPlugTime(entries, w, !!(clean(w.seal1) && clean(w.seal1) !== "-"), special) : { total: 0, baseTime: 0, twistComp: 0, ref: "SP/SC端不计插接工时" };
+  const plug2 = h2Real ? getPlugTime(entries, w, !!(clean(w.seal2) && clean(w.seal2) !== "-"), special) : { total: 0, baseTime: 0, twistComp: 0, ref: "SP/SC端不计插接工时" };
+  const spliceEnds = [w.housing1, w.housing2].filter((h) => isSpliceCode(h)).length;
+  return {
+    rt, plug1, plug2, spliceEnds, special,
+    wireTime: round((rt.takeTime || 0) + (rt.routeTime || 0) + plug1.total + plug2.total),
+    plugMissing: plug1.missing || plug2.missing,
+    routeMissing: rt.takeTime == null || rt.routeTime == null
+  };
+}
+
+// 把一组导线按“护套关联重叠”聚类，并用“累计工时封顶”收口（忽略SP/SC焊点与空端）。
+function clusterWiresByHousing(wires, entries, budget) {
+  const pkgs = []; // {housings:Set, wires:[], time:0}
+  const sorted = wires.slice().sort((a, b) => computeWireEffort(b, entries).wireTime - computeWireEffort(a, entries).wireTime);
+  for (const w of sorted) {
+    const eff = computeWireEffort(w, entries);
+    const wt = eff.wireTime || 1;
+    const hs = [clean(w.housing1), clean(w.housing2)].filter((h) => h && h !== "-" && !isSpliceCode(h));
+    if (!hs.length) { pkgs.push({ housings: new Set(), wires: [w], time: wt }); continue; }
+    let target = null;
+    for (const p of pkgs) {
+      if (hs.some((h) => p.housings.has(h)) && (p.time + wt) <= budget) { target = p; break; }
+    }
+    if (!target) { target = { housings: new Set(), wires: [], time: 0 }; pkgs.push(target); }
+    for (const h of hs) target.housings.add(h);
+    target.wires.push(w);
+    target.time += wt;
+  }
+  return pkgs.filter((p) => p.wires.length);
+}
+
+function buildPackages(wires, configs, entries, tt) {
+  // 候选包“按工时封顶”的目标：一组活的累计工时预算（为护套放置等室内动作留余地，避免整包超TT）
+  const pkgBudget = tt && tt > 0 ? Math.max(30, Math.round(tt * 0.6)) : 80;
+  const mkPkg = (ws, seq, kind, name, key) => {
     const housingMap = new Map();
     const spliceMap = new Map();
     for (const w of ws) {
       for (const h of [w.housing1, w.housing2]) {
         const hh = clean(h);
         if (!hh || hh === "-") continue;
-        if (isSpliceCode(hh)) {
-          spliceMap.set(hh, (spliceMap.get(hh) || 0) + 1);
-        } else {
-          housingMap.set(hh, (housingMap.get(hh) || 0) + 1);
-        }
+        if (isSpliceCode(hh)) spliceMap.set(hh, (spliceMap.get(hh) || 0) + 1);
+        else housingMap.set(hh, (housingMap.get(hh) || 0) + 1);
       }
     }
     const housingEntries = [...housingMap.entries()].sort((a, b) => b[1] - a[1]);
@@ -502,20 +527,13 @@ function buildPackages(wires, configs, entries) {
     const maxLength = Math.max(0, ...ws.map((w) => w.length || 0));
 
     let routeType = "待定";
-    if (wireCount <= 5 && housingEntries.length <= 3 && maxLength <= 3000) {
-      routeType = "固定KIT候选";
-    } else if (wireCount > 12 || maxLength > 6000 || housingEntries.length > 8) {
-      routeType = "SUB滑板候选";
-    }
+    if (wireCount <= 5 && housingEntries.length <= 3 && maxLength <= 3000) routeType = "固定KIT候选";
+    else if (wireCount > 12 || maxLength > 6000 || housingEntries.length > 8) routeType = "SUB滑板候选";
 
     const pkg = {
       id: "PKG-" + String(seq).padStart(4, "0"),
-      kind: group.kind,
-      name: group.name,
-      key: group.key,
-      wireCount,
-      totalLength: round(totalLength, 0),
-      maxLength: round(maxLength, 0),
+      kind, name, key: key || name,
+      wireCount, totalLength: round(totalLength, 0), maxLength: round(maxLength, 0),
       housings: housingEntries.map(([h, c]) => `${h}(${c})`).join("、"),
       housingCount: housingEntries.length,
       spliceCodes: spliceEntries.map(([h, c]) => `${h}(${c})`).join("、"),
@@ -528,53 +546,43 @@ function buildPackages(wires, configs, entries) {
       estimatedSeconds: null,
       configTime: {}
     };
-
     let total = 0;
     for (const w of ws) {
-      const rt = getRouteStandardTimes(entries, w);
-      const special = isSpecialWire(w);
-      const h1Real = clean(w.housing1) && clean(w.housing1) !== "-" && !isSpliceCode(w.housing1);
-      const h2Real = clean(w.housing2) && clean(w.housing2) !== "-" && !isSpliceCode(w.housing2);
-      const plug1 = h1Real ? getPlugTime(entries, w, !!(clean(w.seal1) && clean(w.seal1) !== "-"), special) : { total: 0, baseTime: 0, twistComp: 0, ref: "SP/SC端不计插接工时" };
-      const plug2 = h2Real ? getPlugTime(entries, w, !!(clean(w.seal2) && clean(w.seal2) !== "-"), special) : { total: 0, baseTime: 0, twistComp: 0, ref: "SP/SC端不计插接工时" };
-      const spliceEnds = [w.housing1, w.housing2].filter((h) => isSpliceCode(h)).length;
-      const wireTime = (rt.takeTime || 0) + (rt.routeTime || 0) + plug1.total + plug2.total;
+      const eff = computeWireEffort(w, entries);
       w._time = {
-        rt,
-        plug1,
-        plug2,
-        spliceEnds,
-        spliceTime: spliceEnds > 0 ? null : null,
-        spliceTimeNote: spliceEnds > 0 ? "SP/SC压接点工时待确认（在线超声波/冷压接/热缩）" : "",
-        plugMissing: plug1.missing || plug2.missing,
-        routeMissing: rt.takeTime == null || rt.routeTime == null,
-        wireTime: round(wireTime, 2)
+        rt: eff.rt, plug1: eff.plug1, plug2: eff.plug2, spliceEnds: eff.spliceEnds,
+        spliceTime: null,
+        spliceTimeNote: eff.spliceEnds > 0 ? "SP/SC压接点工时待确认（在线超声波/冷压接/热缩）" : "",
+        plugMissing: eff.plugMissing,
+        routeMissing: eff.routeMissing,
+        wireTime: eff.wireTime
       };
-      total += wireTime;
+      total += eff.wireTime;
     }
-
-    // 连接器/护套放置工时：只取标准工时表明确的放置动作；未匹配到一律记0并标记【未找到工时源】，
-    // 不使用经验默认值参与TT/岗位判定。
+    // ===== A1 修复：连接器/护套放置工时，从标准工时表“Build connectors to board / 护套放在案板”工序按孔数分档取正式工时 =====
     let connTime = 0;
     let connMissingCount = 0;
-    const connCandidates = [
-      ["Connector placement"],
-      ["Connector", "Place"],
-      ["连接器", "放置"],
-      ["塑件", "放置"],
-      ["护套", "放置"]
-    ];
-    for (const [h, c] of housingEntries) {
-      let connEntry = null;
-      for (const cand of connCandidates) {
-        connEntry = findStandardEntry(entries, cand);
-        if (connEntry) break;
+    const connRows = (entries || []).filter((e) => /Build connectors to board|护套放在案板/.test(String(e.process || "")));
+    const pickConn = (posCount) => {
+      if (connRows.length && posCount > 40) {
+        const e = connRows.find((x) => /40 way|>40|大于40/.test(String(x.comments || "")));
+        if (e) return Number(e.time) || 0;
+      } else if (connRows.length && posCount >= 7) {
+        const e = connRows.find((x) => /7[-~]40|7 ?- ?40/.test(String(x.comments || "")));
+        if (e) return Number(e.time) || 0;
+      } else if (connRows.length && posCount > 0 && posCount <= 6) {
+        const e = connRows.find((x) => /1-6|1 ?- ?6|Ring to V-pin/.test(String(x.comments || "")));
+        if (e) return Number(e.time) || 0;
       }
-      if (connEntry) {
-        connTime += Number(connEntry.time) || 0;
-      } else {
-        connMissingCount += 1;
-      }
+      return null;
+    };
+    for (const [h] of housingEntries) {
+      const maxPos = Math.max(0,
+        ...ws.filter((w) => clean(w.housing1) === h).map((w) => number(w.position1) || 0),
+        ...ws.filter((w) => clean(w.housing2) === h).map((w) => number(w.position2) || 0));
+      if (maxPos <= 0 || !connRows.length) { connMissingCount += 1; continue; }
+      const t = pickConn(maxPos);
+      if (t != null) connTime += t; else connMissingCount += 1;
     }
     pkg.connectorPlacementSeconds = round(connTime, 2);
     pkg.connectorPlacementMissing = connMissingCount > 0;
@@ -587,14 +595,35 @@ function buildPackages(wires, configs, entries) {
       : "估算值，来自标准工时；实际以正式工时分摊与现场验证为准";
     for (const cfg of configs) {
       const cfgWires = ws.filter((w) => w.config[cfg]);
-      const cfgTime =
-        sum(cfgWires.map((w) => w._time?.wireTime || 0)) + connTime;
-      pkg.configTime[cfg] = round(cfgTime, 2);
+      pkg.configTime[cfg] = round(sum(cfgWires.map((w) => w._time?.wireTime || 0)) + connTime, 2);
     }
+    return pkg;
+  };
 
-    packages.push(pkg);
+  const groups = new Map();
+  for (const w of wires) {
+    const key = w.w3 || w.w2 || "W1:" + (w.w1 || w.drawingId);
+    if (!groups.has(key)) {
+      groups.set(key, { key, kind: w.w3 ? "W3" : w.w2 ? "W2" : "W1直挂", name: w.w3 || w.w2 || w.w1 || w.drawingId, wires: [] });
+    }
+    groups.get(key).wires.push(w);
   }
 
+  const packages = [];
+  let seq = 0;
+  const w1DirectPool = [];
+  for (const group of groups.values()) {
+    if (group.kind === "W1直挂") { w1DirectPool.push(...group.wires); continue; }
+    seq += 1;
+    packages.push(mkPkg(group.wires, seq, group.kind, group.name, group.key));
+  }
+  // W1直挂 → 按护套关联聚合成候选工作包
+  const clusters = clusterWiresByHousing(w1DirectPool, entries, pkgBudget);
+  for (const c of clusters) {
+    seq += 1;
+    const rep = c.housings && c.housings.size ? [...c.housings][0] : (c.wires[0] && (c.wires[0].w1 || c.wires[0].drawingId)) || "散线";
+    packages.push(mkPkg(c.wires, seq, c.wires.length > 1 ? "W1直挂-护套聚合" : "W1直挂", `护套关联包(${rep})`, "AGG"));
+  }
   return packages.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
 }
 
@@ -1932,7 +1961,7 @@ async function analyzeProject(files, options = {}) {
   const fileAnalysis = buildFileAnalysis(mergedMbom);
   const ultrasonicRules = buildUltrasonicRules(wires, configs, noOnlineUltrasonicSplices, onlineUltrasonicMaxGroupsPerConfig, onlineUltrasonicMaxTotalGroups);
   const wireRows = buildWireRows(wires);
-  const packages = buildPackages(wires, configs, standard.entries);
+  const packages = buildPackages(wires, configs, standard.entries, tt);
   const housingMatrix = buildHousingMatrix(wires, packages);
   const positionRows = buildPositionMatrix(packages);
   const timeRows = buildTimeMatrix(packages, configs, tt);
@@ -2912,7 +2941,7 @@ async function analyzeFilesForPreview(files, options = {}) {
     const standard = files.standard && files.standard.buffer
       ? parseStandardHours(files.standard.buffer, files.standard.originalname)
       : { entries: [] };
-    const packages = buildPackages(mergedMbom.wires, mergedMbom.configs, standard.entries);
+    const packages = buildPackages(mergedMbom.wires, mergedMbom.configs, standard.entries, tt);
     configTotals = {};
     for (const cfg of mergedMbom.configs) {
       configTotals[cfg] = round(sum(packages.map((p) => (p.configTime && p.configTime[cfg]) || 0)), 2);
