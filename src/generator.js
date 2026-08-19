@@ -505,9 +505,15 @@ function clusterWiresByHousing(wires, entries, budget) {
   return pkgs.filter((p) => p.wires.length);
 }
 
+// 候选包“按工时封顶”的目标档：取节拍的约 60%（下限30秒）。
+// 理由：一个候选工作包是“一小段可预装/可计时/可传递的活”，岗位容量≈TT；
+//   若包≈1.0×TT 则自身易超TT且放不下第二个包；若≤0.3×TT 则过碎。
+//   取 0.6×TT 使一个岗位通常能容纳 1~2 个候选包 + 护套放置/打圈余量而仍≤TT，
+//   兼顾“包不过碎”与“尽量不超节拍”（实测 TT120 → 单根包26%、超TT约5/109）。
+const B1_PKG_TIME_BUDGET_FRAC = 0.6;
+const B1_PKG_TIME_BUDGET_MIN = 30;
 function buildPackages(wires, configs, entries, tt) {
-  // 候选包“按工时封顶”的目标：一组活的累计工时预算（为护套放置等室内动作留余地，避免整包超TT）
-  const pkgBudget = tt && tt > 0 ? Math.max(30, Math.round(tt * 0.6)) : 80;
+  const pkgBudget = tt && tt > 0 ? Math.max(B1_PKG_TIME_BUDGET_MIN, Math.round(tt * B1_PKG_TIME_BUDGET_FRAC)) : 80;
   const mkPkg = (ws, seq, kind, name, key) => {
     const housingMap = new Map();
     const spliceMap = new Map();
